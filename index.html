@@ -58,6 +58,8 @@
 
     /* 폼 */
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
+    .grid > * { min-width: 0; }            /* 긴 내용이 칸을 밀어 넓히지 않게 */
+    .grid select { width: 100%; }
     .full { grid-column: 1 / -1; }
     label.f { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
     label.f .req { color: var(--high); }
@@ -214,6 +216,59 @@
     .stat { background: #fbf8f1; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
     .stat b { display: block; font-size: 18px; font-family: var(--serif); }
     .stat span { font-size: 12px; color: var(--ink-soft); }
+
+    /* ---------- 휴지통 ---------- */
+    .trash { margin-top: 14px; border: 1px dashed var(--rule); border-radius: 8px; padding: 8px 12px; background: #fbf8f1; }
+    .trash summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--ink-soft); }
+    .trash p { margin: 6px 0; }
+    .trash-list { list-style: none; margin: 0; padding: 0; }
+    .trash-list li { display: flex; justify-content: space-between; gap: 10px; align-items: center; flex-wrap: wrap;
+      padding: 8px 0; border-top: 1px dotted var(--line); }
+    .trash-list .tt { display: block; font-weight: 600; color: var(--ink-soft); text-decoration: line-through; }
+    .toast {
+      position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 140%); transition: transform .2s;
+      background: var(--ink); color: #fff; border-radius: 10px; padding: 10px 16px; font-size: 14px;
+      display: flex; gap: 14px; align-items: center; max-width: calc(100% - 32px); z-index: 10;
+    }
+    .toast.show { transform: translate(-50%, 0); }
+    .toast .linklike { color: #b9e3d4; font-size: 14px; font-weight: 600; }
+
+    /* ---------- 돌아보기 (카드 4) ---------- */
+    .rv-stats { grid-template-columns: repeat(7, 1fr); gap: 6px; }
+    .rv-stats .stat { padding: 8px 8px; }
+    .rv-stats .stat b { font-size: 16px; white-space: nowrap; }
+    .rv-stats .stat span { display: block; line-height: 1.3; }
+    @media (max-width: 700px) { .rv-stats { grid-template-columns: repeat(4, 1fr); } }
+    @media (max-width: 420px) { .rv-stats { grid-template-columns: repeat(2, 1fr); } }
+    button.stat { text-align: left; cursor: pointer; font: inherit; color: inherit; }
+    button.stat:hover { border-color: var(--accent); }
+    button.stat b { text-decoration: underline dotted var(--rule); text-underline-offset: 4px; }
+    .stat.warn b { color: var(--high); }
+    .stat.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+    .evidence { margin-top: 12px; border: 1px solid var(--accent); border-radius: 8px; padding: 12px 14px; background: #fff; scroll-margin-top: 12px; }
+    .ev-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-bottom: 6px; }
+    .ev-head .linklike { margin-left: auto; }
+    .ev-list { margin: 0; padding-left: 20px; }
+    .ev-list > li { padding: 8px 0; border-bottom: 1px dashed var(--rule); }
+    .ev-task { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .ev-title { font-weight: 600; }
+    .ev-title.done { text-decoration: line-through; color: var(--ink-soft); }
+    .ev-meta { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+    .ev-meta .over { color: var(--high); font-weight: 600; }
+    .badge { background: #f0ebe1; color: var(--ink-soft); }
+    .badge.carry { background: var(--accent); color: #fff; }
+    .carry-box { margin-top: 14px; border-left: 4px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; padding: 10px 14px; }
+    .carry-box .lesson { font-family: var(--serif); font-size: 17px; margin: 4px 0; }
+    .carry-box.out { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+    .carry-box a.btn { text-decoration: none; display: inline-block; }
+    .table-wrap { overflow-x: auto; }
+    table.periods { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .periods th, .periods td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+    .periods thead th { font-size: 12px; color: var(--ink-soft); font-weight: 600; }
+    .periods th[scope=row], .periods thead th:first-child { text-align: left; white-space: normal; min-width: 170px; }
+    .periods th[scope=row] .muted, .lesson-mini { display: block; font-weight: 400; }
+    .lesson-mini { font-size: 12px; color: var(--accent); }
+    .periods a.num { font-weight: 600; text-decoration: underline dotted; text-underline-offset: 3px; }
     @media (max-width: 560px) {
       .lf-grid { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, 1fr); }
@@ -239,7 +294,7 @@
 <div class="wrap">
   <header>
     <h1 class="brand"><a href="#/">플랜두씨 다이어리</a></h1>
-    <div class="flow"><b>Plan 계획</b> → <b>Do 실제로 한 일</b> → <span class="later">See 돌아보기</span></div>
+    <div class="flow"><b>Plan 계획</b> → <b>Do 실제로 한 일</b> → <b>See 돌아보기</b> <span class="later">→ 다음 계획</span></div>
   </header>
 
   <p class="notice" role="note">
@@ -268,6 +323,10 @@ async function api(path, options = {}) {
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+  if (options.meta) {                         // 부르는 쪽이 서버가 어떻게 처리했는지 알 수 있게
+    options.meta.status = res.status;
+    options.meta.replay = res.headers.get('Idempotent-Replay') === 'true';
+  }
   let data = null;
   try { data = await res.json(); } catch { /* 본문 없음 */ }
   // 409 = 같은 키의 요청을 서버가 지금 처리하는 중 → 이미 접수된 것이므로 오류가 아님
@@ -407,10 +466,15 @@ function readPlanForm(form) {
   return data;
 }
 
-/* ===================== 화면 1: 계획 목록 + 새 계획 ===================== */
-async function showHome() {
+/* ===================== 화면 1: 계획 목록 + 기간별 돌아보기 + 새 계획 ===================== */
+async function showHome(params = new URLSearchParams()) {
   app.innerHTML = '<p class="status">불러오는 중…</p>';
-  const plans = await api('/plans');
+  const fromId = params.get('from');
+  const [plans, { periods }, source] = await Promise.all([
+    api('/plans'), api('/reviews'), fromId ? api(`/reviews/${fromId}`).catch(() => null) : null,
+  ]);
+  const cell = (p, kind, value) =>
+    `<td><a class="num" href="#/plan/${p.plan_id}?review=${kind}" title="${esc(REVIEW_LABEL[kind])} — 근거 기록 보기">${value}</a></td>`;
   app.innerHTML = `
     <section class="sheet">
       <h2>내 계획</h2>
@@ -419,25 +483,59 @@ async function showHome() {
           <span class="t">${esc(p.title)}</span>
           <span class="m">${fmtDate(p.start_date)} ~ ${fmtDate(p.end_date)} · 예상 ${fmtMinutes(p.estimated_minutes)}</span>
           <span class="b">
+            ${p.from_review_id ? '<span class="badge carry" title="지난 돌아보기의 고칠 점을 이어받음">↩ 고칠 점</span>' : ''}
             ${p.version > 1 ? `<span class="badge ver">${p.version - 1}번 고침</span>` : ''}
             <span class="badge ${esc(p.priority)}">${PRIORITY[p.priority] ?? ''}</span>
           </span>
         </a></li>`).join('')}</ul>`
       : '<p class="empty">아직 계획이 없습니다. 아래에서 지금 실제로 하고 있는 일 하나를 계획으로 옮겨 보세요.</p>'}
     </section>
+
+    ${periods.length ? `
     <section class="sheet">
+      <h2>기간별 돌아보기</h2>
+      <p class="muted" style="margin-top:-8px">계획 하나 = 기간 하나. 숫자를 누르면 그 숫자가 나온 기록으로 갑니다. 시간 차이는 실제 − 예상.</p>
+      <div class="table-wrap"><table class="periods">
+        <thead><tr><th>기간</th><th>계획</th><th>완료</th><th>지연</th><th>막힘</th><th>예상</th><th>실제</th><th>차이</th></tr></thead>
+        <tbody>${periods.map((p) => `
+          <tr>
+            <th scope="row"><a href="#/plan/${p.plan_id}">${esc(p.title)}</a>
+              <span class="muted">${fmtDate(p.start_date)} ~ ${fmtDate(p.end_date)}</span>
+              ${p.lesson ? `<span class="lesson-mini">고칠 점 · ${esc(p.lesson)}</span>` : ''}</th>
+            ${cell(p, 'tasks', p.summary.tasks)}${cell(p, 'done', p.summary.done)}
+            ${cell(p, 'delayed', p.summary.delayed)}${cell(p, 'blocked', p.summary.blocked)}
+            ${cell(p, 'planned', fmtMinutes(p.summary.planned))}${cell(p, 'actual', fmtMinutes(p.summary.actual))}
+            ${cell(p, 'diff', fmtDiff(p.summary.diff))}
+          </tr>`).join('')}</tbody>
+      </table></div>
+    </section>` : ''}
+
+    <section class="sheet" id="new-plan">
       <h2>새 계획 세우기</h2>
-      ${planForm()}
+      ${source ? `
+        <div class="carry-box">
+          <b>↩ 지난 돌아보기에서 넘어온 고칠 점</b>
+          <p class="lesson">${esc(source.lesson)}</p>
+          <span class="muted">— ${esc(source.plan_title)} (${fmtDate(source.plan_start)} ~ ${fmtDate(source.plan_end)})의 돌아보기.
+            이 계획을 저장하면 이 고칠 점이 함께 이어집니다.</span>
+        </div>` : ''}
+      ${planForm(source ? { goal: `지난 돌아보기의 고칠 점: ${source.lesson}` } : {})}
     </section>`;
 
   const form = document.getElementById('plan-form');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     await submit(form, async () => {
-      const created = await api('/plans', { method: 'POST', body: readPlanForm(form) });
+      const body = readPlanForm(form);
+      if (source) body.from_review_id = source.id;
+      const created = await api('/plans', { method: 'POST', body });
       location.hash = `#/plan/${created.id}`;
     });
   });
+  if (source) {
+    document.getElementById('new-plan').scrollIntoView();
+    document.getElementById('f-title').focus({ preventScroll: true });
+  }
 }
 
 /* ===================== 화면 2: 계획 상세 + 고치기 + 이력 ===================== */
@@ -462,6 +560,7 @@ async function showPlan(id, params = new URLSearchParams()) {
         <dt>성공 기준</dt><dd class="criteria pre">${esc(plan.success_criteria) || '<span class="muted">(없음)</span>'}</dd>
         ${plan.goal ? `<dt>메모</dt><dd class="pre">${esc(plan.goal)}</dd>` : ''}
       </dl>
+      <div id="carry-in"></div>
       <div class="actions"><button class="btn ghost" id="start-edit">계획 고치기</button></div>
     </section>
 
@@ -476,11 +575,37 @@ async function showPlan(id, params = new URLSearchParams()) {
     <section class="sheet" id="do">
       <div class="sec-head"><h2>실제로 한 일</h2>
         <span class="muted">계획과 따로 저장 — 기록해도 계획·예상 시간은 그대로</span></div>
-      <h3 class="sub">돌아보기 집계</h3>
-      <div class="stats" id="do-stats"></div>
-      <p class="muted" style="margin:6px 0 0">완료는 할 일 하나당 한 번만 셉니다. 완료를 여러 번 눌러도, 되돌렸다 다시 완료해도 1건입니다.</p>
       <h3 class="sub">실행 기록 <span class="muted">— 최근 것부터, 어느 할 일의 기록인지 함께</span></h3>
       <ul class="log-list" id="do-logs"><li class="empty">불러오는 중…</li></ul>
+    </section>
+
+    <section class="sheet" id="review">
+      <div class="sec-head"><h2>돌아보기</h2><span class="muted" id="rv-today"></span></div>
+      <p class="muted" style="margin-top:-6px">숫자를 누르면 그 숫자가 나온 기록이 아래에 열립니다. 시간은 모두 분 단위로 더하고, 차이 = 실제 − 예상.</p>
+      <div class="stats rv-stats" id="rv-stats"></div>
+      <div id="evidence" class="evidence" hidden></div>
+
+      <h3 class="sub">이번 계획 돌아보기</h3>
+      <form id="review-form" novalidate>
+        <div class="grid">
+          <div><label class="f" for="rv-well">잘된 점</label><textarea id="rv-well" name="went_well" maxlength="1000"></textarea></div>
+          <div><label class="f" for="rv-wrong">아쉬운 점</label><textarea id="rv-wrong" name="went_wrong" maxlength="1000"></textarea></div>
+          <div class="full">
+            <label class="f" for="rv-pattern">이번 계획은 주로 어느 쪽으로 빗나갔나요? <span class="req">*</span></label>
+            <select id="rv-pattern" name="miss_pattern"></select>
+          </div>
+          <div class="full">
+            <label class="f" for="rv-lesson">다음 계획으로 넘길 고칠 점 한 줄 <span class="req">*</span></label>
+            <input id="rv-lesson" name="lesson" type="text" maxlength="200"
+                   placeholder="예) 배포가 걸린 할 일은 예상 시간을 1.5배로 잡는다">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn" type="submit">돌아보기 저장</button>
+          <span class="err" role="alert"></span>
+        </div>
+      </form>
+      <div id="carry-out"></div>
     </section>
 
     <section class="sheet">
@@ -510,6 +635,7 @@ async function showPlan(id, params = new URLSearchParams()) {
     });
   });
 
+  initReview(id, params);
   initTasks(id, params);
 }
 
@@ -606,6 +732,11 @@ function tasksSection() {
     </div>
     <p class="sort-rule" id="sort-rule"></p>
     <ul class="task-list" id="task-list"><li class="empty">불러오는 중…</li></ul>
+    <details class="trash" id="trash" hidden>
+      <summary>휴지통 <span id="trash-count"></span></summary>
+      <p class="muted">지운 할 일은 30일 동안 여기 있다가 자동으로 사라집니다. 되돌리면 실행 기록·완료까지 그대로 돌아옵니다.</p>
+      <ul class="trash-list" id="trash-list"></ul>
+    </details>
   </section>`;
 }
 
@@ -687,7 +818,10 @@ async function loadTasks() {
   }
   // 주소창에도 조건을 남겨 둔다 → 새로고침·링크 공유해도 같은 화면
   const qs = params.toString();
-  history.replaceState(null, '', `#/plan/${tasksPlanId}${qs ? '?' + qs : ''}`);
+  const hashParams = new URLSearchParams(params);
+  if (reviewKind) hashParams.set('review', reviewKind);   // 열어 둔 돌아보기 근거도 함께
+  const hq = hashParams.toString();
+  history.replaceState(null, '', `#/plan/${tasksPlanId}${hq ? '?' + hq : ''}`);
 
   let res;
   try {
@@ -847,19 +981,42 @@ function openLogForm(li, t) {
   li.appendChild(wrap);
   const form = wrap.querySelector('form');
   const [h, m] = [form.querySelector('[name=hours]'), form.querySelector('[name=minutes]')];
-  let touched = false;                           // 사람이 직접 고친 뒤에는 자동으로 덮어쓰지 않음
-  const sync = () => {
-    const s = new Date(form.started_at.value), e = new Date(form.ended_at.value);
-    const span = Math.round((e - s) / 60000);
-    form.querySelector('.span-hint').textContent =
-      isNaN(span) ? '' : span < 0 ? '끝난 시각이 시작보다 빠릅니다' : `시작~끝 ${fmtMinutes(span)} (쉰 시간이 있으면 줄이세요)`;
-    if (!touched && span >= 0) { h.value = Math.floor(span / 60); m.value = span % 60; }
+  const hint = form.querySelector('.span-hint');
+  let touched = false;                           // 사람이 실제 시간을 직접 고쳤는지
+  const spanMin = () => Math.round((new Date(form.ended_at.value) - new Date(form.started_at.value)) / 60000);
+  const actualMin = () => Number(h.value || 0) * 60 + Number(m.value || 0);
+  const setActual = (v) => { h.value = Math.floor(v / 60); m.value = v % 60; };
+  const showSpan = (extra = '') => {
+    const span = spanMin();
+    hint.textContent = isNaN(span) ? ''
+      : span < 0 ? '끝난 시각이 시작보다 빠릅니다'
+      : `시작~끝 ${fmtMinutes(span)}${extra}`;
   };
-  form.started_at.addEventListener('input', sync);
-  form.ended_at.addEventListener('input', sync);
-  h.addEventListener('input', () => { touched = true; });
-  m.addEventListener('input', () => { touched = true; });
-  sync();
+  // 마지막으로 고친 칸이 이긴다.
+  //  · 시각을 고치면: 실제 시간을 아직 안 건드렸으면 시작~끝으로 채우고, 건드렸는데 더 길면 시작~끝으로 줄인다.
+  //  · 실제 시간을 고치면: 시작~끝보다 길 때 시작 시각을 그만큼 앞당긴다 (예상보다 오래 걸린 경우).
+  const onTimes = () => {
+    const span = spanMin();
+    if (isNaN(span) || span < 0) return showSpan();
+    if (!touched) { setActual(span); return showSpan(' (쉰 시간이 있으면 실제 시간을 줄이세요)'); }
+    if (actualMin() > span) { setActual(span); return showSpan(' — 실제 시간을 시작~끝에 맞춰 줄였습니다'); }
+    showSpan();
+  };
+  const onActual = () => {
+    touched = true;
+    const actual = actualMin(), span = spanMin();
+    if (!isNaN(span) && actual > span && actual <= 1440 && form.ended_at.value) {
+      const end = new Date(form.ended_at.value);
+      form.started_at.value = toLocalInput(new Date(end.getTime() - actual * 60000));
+      return showSpan(' — 실제 시간에 맞춰 시작 시각을 앞당겼습니다');
+    }
+    showSpan(actual > 1440 ? ' — 한 기록은 24시간까지입니다' : '');
+  };
+  form.started_at.addEventListener('input', onTimes);
+  form.ended_at.addEventListener('input', onTimes);
+  h.addEventListener('input', onActual);
+  m.addEventListener('input', onActual);
+  onTimes();
   form.querySelector('[data-act=cancel-log]').onclick = (e) => { e.stopPropagation(); wrap.remove(); };
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -867,7 +1024,9 @@ function openLogForm(li, t) {
       const started_at = fromLocalInput(form.started_at.value), ended_at = fromLocalInput(form.ended_at.value);
       if (!started_at || !ended_at) throw new Error('시작·끝난 시각을 모두 적어 주세요');
       if (ended_at < started_at) throw new Error('끝난 시각이 시작보다 빠릅니다');
-      const actual = Number(h.value || 0) * 60 + Number(m.value || 0);
+      const actual = actualMin();
+      if (actual > 1440) throw new Error('한 기록은 24시간까지입니다. 나눠서 기록해 주세요');
+      if (actual > spanMin()) throw new Error('실제 시간이 시작~끝보다 깁니다. 시작 시각을 앞당겨 주세요');
       // form.dataset.key: 이 폼을 연 순간 정해진 키 → 저장을 몇 번 눌러도 기록은 1건
       await api(`/tasks/${t.id}/logs`, {
         method: 'POST', key: form.dataset.key,
@@ -881,19 +1040,212 @@ function openLogForm(li, t) {
   form.started_at.focus();
 }
 
+/* ===================== 휴지통 ===================== */
+async function loadTrash() {
+  const box = $('trash');
+  if (!box || !tasksPlanId) return;
+  let r;
+  try { r = await api(`/plans/${tasksPlanId}/trash`); } catch { return; }
+  box.hidden = !r.tasks.length;
+  $('trash-count').textContent = r.tasks.length ? `${r.tasks.length}개` : '';
+  $('trash-list').innerHTML = r.tasks.map((t) => `
+    <li data-id="${t.id}">
+      <div><span class="tt">${esc(t.title)}</span>
+        <span class="muted">지운 날 ${fmtStamp(t.deleted_at)} · ${t.days_left}일 뒤 영구 삭제 · 예상 ${fmtMinutes(t.planned_minutes)}</span></div>
+      <div class="row-actions">
+        <button type="button" class="btn small" data-act="restore">되돌리기</button>
+        <button type="button" class="btn danger small" data-act="purge">영구 삭제</button>
+      </div>
+    </li>`).join('');
+}
+
+async function restoreTask(id) {
+  try { await api(`/tasks/${id}/restore`, { method: 'POST' }); toast('할 일을 되돌렸습니다.'); }
+  catch (err) { alert(err.message); }
+  await loadTasks();
+}
+
+document.addEventListener('click', async (e) => {
+  const li = e.target.closest('#trash-list li');
+  if (!li) return;
+  const id = Number(li.dataset.id), title = li.querySelector('.tt').textContent;
+  if (e.target.dataset.act === 'restore') return restoreTask(id);
+  if (e.target.dataset.act === 'purge') {
+    if (!confirm(`"${title}"을(를) 영구 삭제할까요?\n딸린 실행 기록까지 지워지고, 되돌릴 수 없습니다.`)) return;
+    try { await api(`/tasks/${id}?permanent=1`, { method: 'DELETE' }); toast('영구 삭제했습니다.'); }
+    catch (err) { alert(err.message); }
+    await loadTasks();
+  }
+});
+
+// 화면 아래에 잠깐 뜨는 알림 (되돌리기 같은 버튼 하나를 붙일 수 있음)
+let toastTimer;
+function toast(text, action) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast'; el.className = 'toast'; el.setAttribute('role', 'status');
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<span>${esc(text)}</span>${action ? `<button type="button" class="linklike">${esc(action.label)}</button>` : ''}`;
+  if (action) el.querySelector('button').onclick = () => { el.classList.remove('show'); action.run(); };
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), action ? 8000 : 3000);
+}
+
 function renderStats(res) {
-  const s = res.summary;
-  const box = $('do-stats');
+  loadTrash();
+  const box = $('do-logs');
   if (!box) return;
-  box.innerHTML = `
-    <div class="stat"><b>${s.completions}</b><span>완료</span></div>
-    <div class="stat"><b>${s.logs}</b><span>실행 기록</span></div>
-    <div class="stat"><b>${fmtMinutes(s.actual)}</b><span>실제 시간 합</span></div>
-    <div class="stat"><b>${fmtMinutes(s.planned)}</b><span>예상 시간 합</span></div>
-    <div class="stat"><b>${s.blocked}</b><span>막힘 기록</span></div>`;
-  $('do-logs').innerHTML = res.logs.length
+  box.innerHTML = res.logs.length
     ? res.logs.map((l) => logLine(l, { withTask: true })).join('')
     : '<li class="empty">아직 실행 기록이 없습니다. 할 일의 <b>기록</b> 버튼으로 실제로 한 일을 남겨 보세요.</li>';
+  loadReview();      // 할 일·기록이 바뀌면 돌아보기 숫자도 다시
+}
+
+/* ===================== 돌아보기 (카드 4) =====================
+   숫자와 '그 숫자를 누르면 나오는 기록'은 서버의 같은 판정에서 온다.        */
+const REVIEW_LABEL = {
+  tasks: '계획', done: '완료', delayed: '지연', blocked: '막힘',
+  planned: '예상 시간', actual: '실제 시간', diff: '차이 (실제 − 예상)',
+};
+const PATTERN_LABEL = {
+  underestimate: '시간을 적게 잡았다 (실제가 더 걸림)',
+  overestimate: '시간을 넉넉히 잡았다 (실제가 덜 걸림)',
+  unplanned: '계획에 없던 일에 밀렸다',
+  skipped: '마감을 넘기거나 못 했다',
+  on_track: '거의 계획대로였다',
+};
+let reviewPlanId = null, reviewKind = null, reviewReq = 0, reviewFormFilled = false;
+
+function fmtDiff(m) {
+  if (!m) return '±0분';
+  return (m > 0 ? '+' : '−') + fmtMinutes(Math.abs(m));
+}
+
+function initReview(planId, params) {
+  reviewPlanId = planId;
+  reviewKind = params.get('review');
+  reviewFormFilled = false;
+  $('rv-stats').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-kind]');
+    if (!b) return;
+    reviewKind = reviewKind === b.dataset.kind ? null : b.dataset.kind;   // 같은 숫자를 다시 누르면 닫기
+    loadReview({ scroll: true });
+  });
+  $('evidence').addEventListener('click', (e) => {
+    if (e.target.dataset.act === 'close-evidence') { reviewKind = null; loadReview(); }
+  });
+  const form = $('review-form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submit(form, async () => {
+      const lesson = form.lesson.value.trim();
+      if (!lesson) throw new Error('다음 계획으로 넘길 고칠 점을 한 줄 적어 주세요');
+      await api(`/plans/${planId}/review`, { method: 'PUT', body: {
+        went_well: form.went_well.value.trim() || null, went_wrong: form.went_wrong.value.trim() || null,
+        miss_pattern: form.miss_pattern.value, lesson } });
+      reviewFormFilled = false;
+      await loadReview();
+    });
+  });
+}
+
+async function loadReview({ scroll = false } = {}) {
+  if (!reviewPlanId || !$('rv-stats')) return;
+  const my = ++reviewReq;
+  const qs = reviewKind ? `?kind=${encodeURIComponent(reviewKind)}` : '';
+  let r;
+  try { r = await api(`/plans/${reviewPlanId}/review${qs}`); }
+  catch (e) { $('rv-stats').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (my !== reviewReq) return;
+  syncHash();
+  const s = r.summary;
+  $('rv-today').textContent = `서울 기준 오늘 ${fmtDate(r.today)}`;
+  const stat = (kind, value, cls = '') => `
+    <button type="button" class="stat ${cls} ${reviewKind === kind ? 'on' : ''}" data-kind="${kind}"
+            aria-pressed="${reviewKind === kind}" title="${esc(r.kinds[kind])}">
+      <b>${value}</b><span>${REVIEW_LABEL[kind]}</span></button>`;
+  $('rv-stats').innerHTML =
+    stat('tasks', s.tasks) + stat('done', s.done) + stat('delayed', s.delayed, s.delayed ? 'warn' : '') +
+    stat('blocked', s.blocked, s.blocked ? 'warn' : '') + stat('planned', fmtMinutes(s.planned)) +
+    stat('actual', fmtMinutes(s.actual)) + stat('diff', fmtDiff(s.diff), s.diff > 0 ? 'warn' : '');
+
+  renderEvidence(r);
+  if (scroll && reviewKind) $('evidence').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // 출처(이 계획이 이어받은 고칠 점)
+  $('carry-in').innerHTML = r.source_review ? `
+    <div class="carry-box">
+      <b>↩ 지난 돌아보기에서 넘어온 고칠 점</b>
+      <p class="lesson">${esc(r.source_review.lesson)}</p>
+      <span class="muted">— <a href="#/plan/${r.source_review.plan_id}?review=diff">${esc(r.source_review.plan_title)}</a>의 돌아보기</span>
+    </div>` : '';
+
+  // 돌아보기 폼: 처음 한 번만 저장된 값(없으면 데이터 추천)으로 채운다 — 쓰는 중인 글을 덮지 않게
+  const form = $('review-form');
+  if (!reviewFormFilled) {
+    form.miss_pattern.innerHTML = Object.entries(PATTERN_LABEL).map(([k, v]) =>
+      `<option value="${k}">${esc(v)}${k === r.suggested_pattern ? ' — 기록으로 본 추천' : ''}</option>`).join('');
+    form.miss_pattern.value = r.review?.miss_pattern || r.suggested_pattern;
+    form.went_well.value = r.review?.went_well || '';
+    form.went_wrong.value = r.review?.went_wrong || '';
+    form.lesson.value = r.review?.lesson || '';
+    reviewFormFilled = true;
+  }
+  $('carry-out').innerHTML = r.review ? `
+    <div class="carry-box out">
+      <b>다음 계획으로 넘길 한 줄</b>
+      <p class="lesson">${esc(r.review.lesson)}</p>
+      ${r.next_plans.length
+        ? `<span>이어받은 계획: ${r.next_plans.map((p) => `<a href="#/plan/${p.id}">${esc(p.title)}</a>`).join(', ')}</span>
+           <a class="btn ghost small" href="#/?from=${r.review.id}">이 고칠 점으로 계획 하나 더 만들기</a>`
+        : `<a class="btn small" href="#/?from=${r.review.id}">이 고칠 점으로 다음 계획 만들기 →</a>`}
+    </div>` : '';
+}
+
+function renderEvidence(r) {
+  const box = $('evidence');
+  if (!reviewKind || !r.records) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  const sumLine = {
+    planned: `합계 ${fmtMinutes(r.records.reduce((a, x) => a + x.planned_minutes, 0))} = 예상 시간`,
+    actual: `합계 ${fmtMinutes(r.records.reduce((a, x) => a + x.actual_minutes, 0))} = 실제 시간 (실행 기록이 있는 할 일만)`,
+    diff: `합계 ${fmtDiff(r.records.reduce((a, x) => a + x.diff_minutes, 0))} = 실제 − 예상`,
+  }[reviewKind];
+  box.innerHTML = `
+    <div class="ev-head">
+      <b>근거 기록 · ${esc(r.label)}</b>
+      <span class="muted">${r.records.length}건${sumLine ? ' · ' + sumLine : ''}</span>
+      <button type="button" class="linklike" data-act="close-evidence">닫기</button>
+    </div>
+    ${r.records.length ? `<ol class="ev-list">${r.records.map((t) => `
+      <li>
+        <div class="ev-task">
+          <span class="ev-title ${t.is_done ? 'done' : ''}">${esc(t.title)}</span>
+          ${t.is_done ? '<span class="badge ver">완료</span>' : '<span class="badge">진행 중</span>'}
+          ${t.is_delayed ? '<span class="badge high">지연</span>' : ''}
+          ${t.is_blocked ? '<span class="badge medium">막힘</span>' : ''}
+        </div>
+        <div class="ev-meta">
+          마감 ${t.due_date ? fmtDate(t.due_date) : '없음'} ·
+          예상 ${fmtMinutes(t.planned_minutes)} · 실제 ${fmtMinutes(t.actual_minutes)} ·
+          <span class="${t.diff_minutes > 0 ? 'over' : ''}">차이 ${fmtDiff(t.diff_minutes)}</span>
+        </div>
+        ${t.logs.length ? `<ul class="log-list">${t.logs.map((l) => logLine(l)).join('')}</ul>`
+          : '<div class="muted" style="font-size:13px">실행 기록 없음</div>'}
+      </li>`).join('')}</ol>`
+    : '<p class="empty">이 숫자에 해당하는 할 일이 없습니다 (0건).</p>'}`;
+}
+
+// 주소창에 할 일 조건 + 열어 둔 근거(review=)를 함께 남겨 새로고침·공유해도 같은 화면
+function syncHash() {
+  if (!tasksPlanId) return;
+  const p = currentTaskParams();
+  if (reviewKind) p.set('review', reviewKind);
+  const qs = p.toString();
+  history.replaceState(null, '', `#/plan/${tasksPlanId}${qs ? '?' + qs : ''}`);
 }
 
 function taskOf(el) {
@@ -938,9 +1290,11 @@ async function onTaskClick(e) {
   }
   if (act === 'log') return openLogForm(li, task);
   if (act === 'delete') {
-    if (!confirm(`"${task.title}" 할 일을 지울까요?\n딸린 실행 기록도 함께 지워집니다.`)) return;
-    try { await api(`/tasks/${task.id}`, { method: 'DELETE' }); }
-    catch (err) { alert(err.message); }
+    if (!confirm(`"${task.title}" 할 일을 휴지통으로 옮길까요?\n30일 안에는 휴지통에서 되돌릴 수 있습니다.`)) return;
+    try {
+      await api(`/tasks/${task.id}`, { method: 'DELETE' });
+      toast(`"${task.title}"을(를) 휴지통으로 옮겼습니다.`, { label: '되돌리기', run: () => restoreTask(task.id) });
+    } catch (err) { alert(err.message); }
     return loadTasks();
   }
   if (act === 'edit') openTaskEdit(li, task);
@@ -986,14 +1340,14 @@ function openTaskEdit(li, t) {
 }
 
 /* ===================== 제출 공통 처리 ===================== */
-async function submit(form, work) {
+async function submit(form, work, { lock = true } = {}) {
   const btn = form.querySelector('button[type=submit]');
   const err = form.querySelector('.err');
   err.textContent = '';
-  btn.disabled = true;
+  if (lock) btn.disabled = true;
   try { await work(); }
   catch (e) { err.textContent = e.message; }
-  finally { btn.disabled = false; }
+  finally { if (lock) btn.disabled = false; }
 }
 
 /* ===================== 주소(#) 따라 화면 고르기 ===================== */
@@ -1001,7 +1355,7 @@ async function route() {
   const m = location.hash.match(/^#\/plan\/(\d+)(?:\?(.*))?$/);
   try {
     if (m) await showPlan(Number(m[1]), new URLSearchParams(m[2] || ''));
-    else await showHome();
+    else await showHome(new URLSearchParams(location.hash.split('?')[1] || ''));
   } catch (e) {
     app.innerHTML = `<section class="sheet"><h2>불러오지 못했습니다</h2>
       <p class="err">${esc(e.message)}</p>

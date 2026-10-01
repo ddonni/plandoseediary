@@ -128,6 +128,10 @@ class Supabase:
     def delete(self, table, **eq):
         return len(self._send("DELETE", table, self._filters(eq), prefer="return=representation"))
 
+    def delete_where(self, table, params: dict):
+        """eq 말고 다른 조건(lt. 등)으로 지울 때. params는 PostgREST 필터 그대로."""
+        return len(self._send("DELETE", table, params, prefer="return=representation"))
+
 
 def db():
     """테스트에서는 app.config["DB"]에 가짜 DB를 넣어 바꿔 끼운다."""
@@ -211,6 +215,14 @@ def get_one(table, id_):
     if not rows:
         raise ApiError(404, "해당 항목이 없습니다")
     return rows[0]
+
+
+def get_task(task_id, deleted=False):
+    """deleted=False: 살아 있는 할 일만. deleted=True: 휴지통에 있는 할 일만."""
+    t = get_one("tasks", task_id)
+    if bool(t.get("deleted_at")) != deleted:
+        raise ApiError(404, "휴지통에 없는 할 일입니다" if deleted else "해당 항목이 없습니다 (휴지통에 있을 수 있어요)")
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +354,9 @@ def summary(prog: list, logs: list, completions=None) -> dict:
     misses = {"over": count["over"], "under": count["under"],
               "unplanned": len(unplanned), "skipped": count["skipped"]}
     top = max(misses, key=misses.get)
-    active = [c for c in (completions or []) if c.get("revoked_at") is None]
+    alive_ids = {t["id"] for t in prog}
+    active = [c for c in (completions or [])
+              if c.get("revoked_at") is None and c["task_id"] in alive_ids]   # 휴지통의 할 일은 빼고
     return {
         "tasks": len(prog),
         "done": sum(t["is_done"] for t in prog),
@@ -361,9 +375,12 @@ def summary(prog: list, logs: list, completions=None) -> dict:
 
 
 def load(plan_id=None):
+    """살아 있는(휴지통에 없는) 할 일과, 그 할 일들 + 계획에 없던 일의 실행 기록."""
     f = {} if plan_id is None else {"plan_id": plan_id}
-    tasks = db().select("tasks", order="due_date.asc.nullslast,id", **f)
-    logs = db().select("logs", order="done_date.desc,id.desc", **f)
+    tasks = db().select("tasks", order="due_date.asc.nullslast,id", deleted_at=None, **f)
+    alive = {t["id"] for t in tasks}
+    logs = [l for l in db().select("logs", order="done_date.desc,id.desc", **f)
+            if l["task_id"] is None or l["task_id"] in alive]
     return tasks, logs
 
 
@@ -492,6 +509,11 @@ PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 KST = timezone(timedelta(hours=9))         # '오늘'은 한국 날짜 기준 (서버는 UTC로 돈다)
 
 
+def today_kst() -> date:
+    """서울 기준 오늘. 테스트에서 바꿔 끼울 수 있게 함수로 둔다."""
+    return datetime.now(KST).date()
+
+
 def tags_field(d, key="tags"):
     """["API", "백엔드"] 또는 "API, 백엔드" 모두 받는다. 앞뒤 공백·중복 제거, 순서 유지."""
     v = d.get(key)
@@ -541,7 +563,7 @@ def create_task(plan_id):
 @idempotent
 def update_task(task_id):
     """내용 고치기, 완료로 바꾸기(status=done), 되돌리기(status=open) 모두 여기서."""
-    current = get_one("tasks", task_id)
+    current = get_task(task_id)
     changes = task_fields(body(), partial=True)
     if not changes:
         raise ApiError(400, "고칠 칸을 하나 이상 보내 주세요")
@@ -553,11 +575,53 @@ def update_task(task_id):
     return jsonify(db().update("tasks", changes, id=task_id)[0])
 
 
+# --- 휴지통 ------------------------------------------------------------------
+#   지우기 = 휴지통으로 옮기기(deleted_at 표시). 딸린 실행 기록·완료 기록은 그대로 두고 화면·집계에서만 뺀다.
+#   되돌리면 전부 원래대로. 30일이 지나거나 '영구 삭제'를 누르면 그때 실제로 지운다(연쇄 삭제).
+TRASH_DAYS = 30
+
+
+def purge_expired(plan_id=None):
+    """휴지통에서 30일 지난 할 일을 실제로 지운다. 휴지통을 읽거나 지울 때마다 함께 정리."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=TRASH_DAYS)).isoformat()
+    params = {"deleted_at": f"lt.{cutoff}"}
+    if plan_id is not None:
+        params["plan_id"] = f"eq.{plan_id}"
+    db().delete_where("tasks", params)
+
+
 @app.delete("/api/tasks/<int:task_id>")
 def delete_task(task_id):
-    if not db().delete("tasks", id=task_id):
-        raise ApiError(404, "해당 항목이 없습니다")
-    return "", 204
+    """기본은 휴지통으로. ?permanent=1 이면 휴지통에 있는 할 일만 영구 삭제."""
+    if request.args.get("permanent") == "1":
+        task = get_task(task_id, deleted=True)
+        db().delete("tasks", id=task["id"])
+        return "", 204
+    task = get_task(task_id)
+    moved = db().update("tasks", {"deleted_at": datetime.now(timezone.utc).isoformat()}, id=task_id)[0]
+    purge_expired(task["plan_id"])
+    return jsonify(moved)
+
+
+@app.post("/api/tasks/<int:task_id>/restore")
+def restore_task(task_id):
+    get_task(task_id, deleted=True)
+    return jsonify(db().update("tasks", {"deleted_at": None}, id=task_id)[0])
+
+
+@app.get("/api/plans/<int:plan_id>/trash")
+def trash(plan_id):
+    get_one("plans", plan_id)
+    purge_expired(plan_id)
+    rows = [t for t in db().select("tasks", order="deleted_at.desc,id.desc", plan_id=plan_id)
+            if t.get("deleted_at")]
+    now = datetime.now(timezone.utc)
+    out = []
+    for t in rows:
+        gone = datetime.fromisoformat(t["deleted_at"].replace("Z", "+00:00")) + timedelta(days=TRASH_DAYS)
+        out.append({**t, "purge_at": gone.isoformat(),
+                    "days_left": max(0, -(-int((gone - now).total_seconds()) // 86400))})
+    return jsonify(tasks=out, keep_days=TRASH_DAYS)
 
 
 # 정렬 규칙: 화면에 그대로 보여줄 설명 + 실제 비교 열쇠.
@@ -637,7 +701,7 @@ def list_tasks(plan_id):
 
     tasks, logs = load(plan_id)
     prog = progress(tasks, logs)
-    today = datetime.now(KST).date()
+    today = today_kst()
 
     def keep(t):
         if q and q not in t["title"].casefold() and not any(q in g.casefold() for g in t["tags"]):
@@ -697,7 +761,8 @@ def build_log(d: dict, plan_id: int, task_id) -> dict:
     if actual is None:
         actual = round(span.total_seconds() / 60)            # 안 적으면 시작~끝 사이 시간
     if actual > span_min:
-        raise ApiError(400, f"actual_minutes: 시작~끝 사이({span_min}분)보다 길 수 없습니다")
+        raise ApiError(400, f"실제 시간({actual}분)이 시작~끝 사이({span_min}분)보다 깁니다. "
+                            "시작 시각을 앞당기거나 끝난 시각을 늦춰 주세요")
     complete = d.get("complete", False)
     if not isinstance(complete, bool):
         raise ApiError(400, "complete: true/false로 보내 주세요")
@@ -718,7 +783,7 @@ def build_log(d: dict, plan_id: int, task_id) -> dict:
 @idempotent
 def create_task_log(task_id):
     """할 일에 붙는 실행 기록. complete=true면 할 일도 완료로 바꾼다(이미 완료면 그대로)."""
-    task = get_one("tasks", task_id)
+    task = get_task(task_id)
     row = build_log(body(), task["plan_id"], task_id)
     log = db().insert("logs", row)
     if row["status"] == "done" and task["status"] != "done":
@@ -749,6 +814,145 @@ def delete_log(log_id):
 
 
 # --- See: 돌아보기 (계획당 하나, 다시 쓰면 덮어쓴다) ---------------------------
+#   집계 숫자와 "그 숫자를 누르면 나오는 기록"은 같은 판정(review_rows의 is_* 값)에서 나온다.
+#   그래서 숫자와 근거 목록의 개수가 어긋날 수 없다.
+def review_rows(tasks: list, logs: list, today: date) -> list:
+    by_task = defaultdict(list)
+    for l in logs:
+        if l["task_id"] is not None:
+            by_task[l["task_id"]].append(l)
+    rows = []
+    for t in tasks:
+        ls = sorted(by_task[t["id"]], key=lambda l: (l.get("started_at") or "", l["id"]))
+        actual = sum(l["actual_minutes"] for l in ls)            # 분 단위
+        done = t["status"] == "done"
+        due = date.fromisoformat(t["due_date"]) if t.get("due_date") else None
+        rows.append({
+            "id": t["id"], "title": t["title"], "status": t["status"], "due_date": t.get("due_date"),
+            "priority": t.get("priority"), "tags": t.get("tags", []),
+            "planned_minutes": t["planned_minutes"],                 # 분 단위
+            "actual_minutes": actual,
+            "diff_minutes": actual - t["planned_minutes"],           # 실제 − 예상 (같은 단위)
+            "logs": ls,
+            "is_done": done,
+            "is_delayed": (not done) and due is not None and due < today,   # 완료한 건 지연이 아님
+            "is_blocked": any(l.get("blocker") for l in ls),
+            "has_logs": bool(ls),
+        })
+    return rows
+
+
+REVIEW_KINDS = {
+    #  kind       화면 이름                                   이 숫자에 들어가는 할 일
+    "tasks":   ("계획한 할 일",                               lambda r: True),
+    "done":    ("완료한 할 일",                               lambda r: r["is_done"]),
+    "delayed": ("지연: 완료 안 됐고 마감일(서울 기준)이 지남",   lambda r: r["is_delayed"]),
+    "blocked": ("막힘: 막힌 이유가 적힌 기록이 있는 할 일",     lambda r: r["is_blocked"]),
+    "planned": ("예상 시간: 할 일마다 잡은 예상 시간",          lambda r: True),
+    "actual":  ("실제 시간: 할 일마다 실행 기록 합계",          lambda r: r["has_logs"]),
+    "diff":    ("차이: 할 일마다 실제 − 예상 (차이 큰 순)",     lambda r: True),
+}
+
+
+def review_summary(rows: list) -> dict:
+    planned = sum(r["planned_minutes"] for r in rows)
+    actual = sum(r["actual_minutes"] for r in rows)
+    return {
+        "tasks": len(rows),
+        "done": sum(r["is_done"] for r in rows),
+        "delayed": sum(r["is_delayed"] for r in rows),
+        "blocked": sum(r["is_blocked"] for r in rows),
+        "planned": planned,                       # 아무것도 없으면 0
+        "actual": actual,
+        "diff": actual - planned,
+    }
+
+
+def suggest_pattern(rows: list, unplanned_count: int) -> str:
+    """데이터로 본 '주로 어느 쪽으로 빗나갔나' 추천 (최종 선택은 사람이)."""
+    score = {
+        "underestimate": sum(1 for r in rows if r["has_logs"] and r["actual_minutes"] > r["planned_minutes"] * OVER_RATIO),
+        "overestimate": sum(1 for r in rows if r["is_done"] and r["actual_minutes"] < r["planned_minutes"] * UNDER_RATIO),
+        "skipped": sum(1 for r in rows if r["is_delayed"]),
+        "unplanned": unplanned_count,
+    }
+    best = max(score, key=score.get)
+    return best if score[best] > 0 else "on_track"
+
+
+def plan_review(plan_id: int, kind: str | None = None) -> dict:
+    plan = get_one("plans", plan_id)
+    tasks, logs = load(plan_id)
+    rows = review_rows(tasks, logs, today_kst())
+    out = {
+        "plan": plan,
+        "today": today_kst().isoformat(),
+        "summary": review_summary(rows),
+        "kinds": {k: v[0] for k, v in REVIEW_KINDS.items()},
+        "suggested_pattern": suggest_pattern(rows, sum(1 for l in logs if l["task_id"] is None)),
+    }
+    if kind is not None:
+        if kind not in REVIEW_KINDS:
+            raise ApiError(400, f"kind: {', '.join(REVIEW_KINDS)} 중 하나여야 합니다")
+        picked = [r for r in rows if REVIEW_KINDS[kind][1](r)]
+        if kind == "diff":
+            picked.sort(key=lambda r: (-abs(r["diff_minutes"]), r["id"]))
+        out["kind"] = kind
+        out["label"] = REVIEW_KINDS[kind][0]
+        out["records"] = picked
+    return out
+
+
+def review_links(plan: dict, review):
+    """이 계획을 낳은 지난 고칠 점(source), 이 계획의 고칠 점을 이어받은 다음 계획들(next)."""
+    source = None
+    if plan.get("from_review_id"):
+        rows = db().select("reviews", id=plan["from_review_id"])
+        if rows:
+            src_plan = db().select("plans", id=rows[0]["plan_id"])
+            source = {**rows[0], "plan_title": src_plan[0]["title"] if src_plan else None}
+    nxt = []
+    if review:
+        nxt = [{"id": p["id"], "title": p["title"], "start_date": p["start_date"], "end_date": p["end_date"]}
+               for p in db().select("plans", order="id", from_review_id=review["id"])]
+    return source, nxt
+
+
+@app.get("/api/plans/<int:plan_id>/review")
+def get_plan_review(plan_id):
+    """?kind=delayed 처럼 주면, 그 숫자가 나온 할 일(과 실행 기록)을 records로 함께 돌려준다."""
+    out = plan_review(plan_id, request.args.get("kind"))
+    review = (db().select("reviews", plan_id=plan_id) or [None])[0]
+    source, nxt = review_links(out["plan"], review)
+    return jsonify(**out, review=review, source_review=source, next_plans=nxt)
+
+
+@app.get("/api/reviews")
+def list_reviews():
+    """기간별 돌아보기: 계획(=기간) 하나당 한 줄."""
+    plans = db().select("plans", order="start_date.desc,id.desc")
+    tasks, logs = load()
+    reviews = {r["plan_id"]: r for r in db().select("reviews")}
+    today = today_kst()
+    out = []
+    for p in plans:
+        rows = review_rows([t for t in tasks if t["plan_id"] == p["id"]],
+                           [l for l in logs if l["plan_id"] == p["id"]], today)
+        r = reviews.get(p["id"])
+        out.append({"plan_id": p["id"], "title": p["title"], "start_date": p["start_date"],
+                    "end_date": p["end_date"], "from_review_id": p.get("from_review_id"),
+                    "summary": review_summary(rows),
+                    "lesson": r["lesson"] if r else None, "review_id": r["id"] if r else None})
+    return jsonify(periods=out, today=today.isoformat())
+
+
+@app.get("/api/reviews/<int:review_id>")
+def get_review(review_id):
+    r = get_one("reviews", review_id)
+    p = get_one("plans", r["plan_id"])
+    return jsonify(**r, plan_title=p["title"], plan_start=p["start_date"], plan_end=p["end_date"])
+
+
 @app.put("/api/plans/<int:plan_id>/review")
 def put_review(plan_id):
     get_one("plans", plan_id)
@@ -758,8 +962,11 @@ def put_review(plan_id):
         "went_well": text(d, "went_well", 1000),
         "went_wrong": text(d, "went_wrong", 1000),
         "miss_pattern": choice(d, "miss_pattern", PATTERNS),
-        "lesson": text(d, "lesson", 500, required=True),
+        # 다음 계획으로 넘길 고칠 점 '한 줄'
+        "lesson": text(d, "lesson", 200, required=True),
     }
+    if "\n" in row["lesson"]:
+        raise ApiError(400, "lesson: 고칠 점은 한 줄로 적어 주세요")
     return jsonify(db().upsert("reviews", row, on_conflict="plan_id"))
 
 

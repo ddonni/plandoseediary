@@ -33,7 +33,7 @@ class FakeDb:
         row = {"id": next(self.ids), **row}
         if table == "tasks":
             for k, v in (("due_date", None), ("priority", "medium"), ("tags", []),
-                         ("status", "open"), ("done_at", None)):
+                         ("status", "open"), ("done_at", None), ("deleted_at", None)):
                 row.setdefault(k, v)
         if table == "plans":
             row.setdefault("from_review_id", None)
@@ -43,6 +43,22 @@ class FakeDb:
         if table == "tasks":
             self._completion_events(None, row)
         return dict(row)
+
+    def delete_where(self, table, params):
+        """PostgREST 필터 흉내: 'lt.값', 'eq.값'만"""
+        def ok(r):
+            for k, cond in params.items():
+                op, val = cond.split(".", 1)
+                v = r.get(k)
+                if op == "lt" and not (v is not None and str(v) < val):
+                    return False
+                if op == "eq" and str(v) != val:
+                    return False
+            return True
+        gone = [r["id"] for r in self.t[table] if ok(r)]
+        for i in gone:
+            self.delete(table, id=i)
+        return len(gone)
 
     def insert_ignore(self, table, row, on_conflict):
         if any(r[on_conflict] == row[on_conflict] for r in self.t[table]):
@@ -268,7 +284,7 @@ def test_delete_cascades_and_404(c):
     pid = make_plan(c)
     tid = make_task(c, pid, 30)
     log(c, pid, 30, "done", tid)
-    assert c.delete(f"/api/tasks/{tid}").status_code == 204
+    assert c.delete(f"/api/tasks/{tid}").status_code == 200   # 휴지통으로
     assert c.get(f"/api/plans/{pid}").json["logs"] == []
     assert c.delete(f"/api/plans/{pid}").status_code == 204
     assert c.get(f"/api/plans/{pid}").status_code == 404
@@ -414,7 +430,7 @@ def test_card2_edit_done_undo_delete(c):                                     # C
     assert r.json["done_at"] == first_done
     r = c.patch(f"/api/tasks/{tid}", json={"status": "open"})
     assert r.json["status"] == "open" and r.json["done_at"] is None
-    assert c.delete(f"/api/tasks/{tid}").status_code == 204
+    assert c.delete(f"/api/tasks/{tid}").status_code == 200   # 휴지통으로
     assert listing(c, pid)["total"] == 0
 
 
@@ -614,3 +630,173 @@ def test_card3_blocked_drilldown(c):
     assert s["blocked"] == 1
     r = c.get(f"/api/records?kind=blocked&plan_id={pid}").json
     assert [l["blocker"] for l in r["logs"]] == ["환경변수 오타"]
+
+
+# ---------------- 카드 4: 돌아보기, 그리고 다음 계획으로 ----------------
+from datetime import date as _date
+
+
+def review(c, pid, kind=None):
+    return c.get(f"/api/plans/{pid}/review" + (f"?kind={kind}" if kind else "")).json
+
+
+def seed_review(c, monkeypatch):
+    monkeypatch.setattr(index, "today_kst", lambda: _date(2026, 10, 2))   # 서울 기준 오늘 = 10/2
+    pid = make_plan(c)
+    mk = lambda title, due, minutes: c.post(f"/api/plans/{pid}/tasks", json={
+        "title": title, "due_date": due, "planned_minutes": minutes}).json["id"]
+    a = mk("완료+막힘+초과", "2026-09-30", 60)     # 마감 지났지만 완료 → 지연 아님
+    b = mk("지연+막힘", "2026-10-01", 30)          # 미완료 + 마감 지남 → 지연
+    d = mk("오늘 마감", "2026-10-02", 45)          # 오늘 마감은 지연 아님
+    e = mk("마감 없음", None, 20)                  # 기록 없음
+    c.post(f"/api/tasks/{a}/logs", json={"started_at": "2026-10-01T09:00:00+09:00", "ended_at": "2026-10-01T10:00:00+09:00",
+                                          "blocker": "키 위치 헷갈림"})
+    c.post(f"/api/tasks/{a}/logs", json={"started_at": "2026-10-01T11:00:00+09:00", "ended_at": "2026-10-01T11:30:00+09:00",
+                                          "complete": True, "blocker": "  "})        # 공백 막힘은 막힘 아님
+    c.post(f"/api/tasks/{b}/logs", json={"started_at": "2026-10-01T13:00:00+09:00", "ended_at": "2026-10-01T13:20:00+09:00",
+                                          "blocker": "배포 502"})
+    c.post(f"/api/tasks/{d}/logs", json={"started_at": "2026-10-01T14:00:00+09:00", "ended_at": "2026-10-01T14:10:00+09:00"})
+    c.post(f"/api/plans/{pid}/logs", json={"started_at": "2026-10-01T15:00:00+09:00", "ended_at": "2026-10-01T15:40:00+09:00",
+                                            "note": "계획에 없던 회의"})                 # 할 일에 안 붙은 기록
+    return pid, (a, b, d, e)
+
+
+def test_card4_counts(c, monkeypatch):                                         # C28~C32
+    pid, (a, b, d, e) = seed_review(c, monkeypatch)
+    s = review(c, pid)["summary"]
+    assert s["tasks"] == 4                                                     # C28
+    assert s["done"] == 1                                                      # C29
+    assert s["delayed"] == 1                                                   # C30 (완료한 a는 제외, 오늘 마감 d 제외)
+    assert s["blocked"] == 2                                                   # C31 (할 일 수: a, b — 기록 수 아님)
+    assert s["planned"] == 60 + 30 + 45 + 20                                   # C32
+    assert s["actual"] == 60 + 30 + 20 + 10                                    # 할 일 기록만 (계획에 없던 40분 제외)
+    assert s["diff"] == s["actual"] - s["planned"]
+    # 지운 할 일은 빠진다
+    c.delete(f"/api/tasks/{e}")
+    s = review(c, pid)["summary"]
+    assert s["tasks"] == 3 and s["planned"] == 135 and s["diff"] == 120 - 135
+
+
+def test_card4_empty_plan_is_zero(c, monkeypatch):
+    monkeypatch.setattr(index, "today_kst", lambda: _date(2026, 10, 2))
+    pid = make_plan(c)
+    assert review(c, pid)["summary"] == {"tasks": 0, "done": 0, "delayed": 0, "blocked": 0,
+                                         "planned": 0, "actual": 0, "diff": 0}
+
+
+def test_card4_complete_then_not_delayed(c, monkeypatch):                      # 완료는 지연으로 안 셈
+    pid, (a, b, d, e) = seed_review(c, monkeypatch)
+    c.patch(f"/api/tasks/{b}", json={"status": "done"})
+    s = review(c, pid)["summary"]
+    assert s["delayed"] == 0 and s["done"] == 2
+
+
+def test_card4_drilldown_matches_numbers(c, monkeypatch):                      # C83
+    pid, (a, b, d, e) = seed_review(c, monkeypatch)
+    s = review(c, pid)["summary"]
+    for kind in ("tasks", "done", "delayed", "blocked"):
+        r = review(c, pid, kind)
+        assert len(r["records"]) == s[kind], kind
+        assert r["label"]
+    assert [x["id"] for x in review(c, pid, "delayed")["records"]] == [b]
+    assert {x["id"] for x in review(c, pid, "blocked")["records"]} == {a, b}
+    r = review(c, pid, "blocked")["records"]
+    assert all(any(l["blocker"] for l in x["logs"]) for x in r)                # 근거 기록(막힌 이유)이 함께 옴
+    assert sum(x["planned_minutes"] for x in review(c, pid, "planned")["records"]) == s["planned"]
+    assert sum(x["actual_minutes"] for x in review(c, pid, "actual")["records"]) == s["actual"]
+    diff = review(c, pid, "diff")["records"]
+    assert sum(x["diff_minutes"] for x in diff) == s["diff"]
+    assert [abs(x["diff_minutes"]) for x in diff] == sorted((abs(x["diff_minutes"]) for x in diff), reverse=True)
+    assert c.get(f"/api/plans/{pid}/review?kind=nope").status_code == 400
+
+
+def test_card4_lesson_carries_to_next_plan(c, monkeypatch):                    # C33
+    pid, _ = seed_review(c, monkeypatch)
+    r = c.put(f"/api/plans/{pid}/review", json={"miss_pattern": "underestimate",
+                                                 "lesson": "배포 관련 할 일은 예상 시간을 1.5배로 잡는다"})
+    assert r.status_code == 200
+    rid = r.json["id"]
+    assert c.put(f"/api/plans/{pid}/review", json={"miss_pattern": "skipped", "lesson": "두 줄\n안 됨"}).status_code == 400
+    info = c.get(f"/api/reviews/{rid}").json
+    assert info["lesson"].startswith("배포 관련") and info["plan_title"] == "10월 1주"
+    nxt = make_plan(c, title="10월 2주", start_date="2026-10-08", end_date="2026-10-14", from_review_id=rid)
+    after = review(c, nxt)
+    assert after["source_review"]["lesson"] == "배포 관련 할 일은 예상 시간을 1.5배로 잡는다"
+    assert after["source_review"]["plan_title"] == "10월 1주"
+    assert review(c, pid)["next_plans"][0]["id"] == nxt                        # 지난 돌아보기에서도 이어짐이 보임
+    periods = c.get("/api/reviews").json["periods"]
+    row = next(p for p in periods if p["plan_id"] == nxt)
+    assert row["from_review_id"] == rid
+
+
+def test_card4_suggested_pattern(c, monkeypatch):
+    pid, _ = seed_review(c, monkeypatch)
+    assert review(c, pid)["suggested_pattern"] in index.PATTERNS
+
+
+# ---------------- 휴지통 (지운 할 일 30일 되돌리기) ----------------
+def test_trash_soft_delete_and_restore(c, monkeypatch):
+    monkeypatch.setattr(index, "today_kst", lambda: _date(2026, 10, 2))
+    pid = make_plan(c)
+    keep = make_task(c, pid, 60, "남길 것")
+    tid = make_task(c, pid, 30, "지울 것")
+    c.post(f"/api/tasks/{tid}/logs", json={**times(20), "blocker": "막힘", "complete": True})
+    before = review(c, pid)["summary"]
+    assert before["tasks"] == 2 and before["done"] == 1 and before["blocked"] == 1 and before["actual"] == 20
+
+    r = c.delete(f"/api/tasks/{tid}")
+    assert r.status_code == 200 and r.json["deleted_at"]
+    # 화면·집계에서 빠짐 (C28: 지우지 않은 할 일만)
+    assert [t["id"] for t in c.get(f"/api/plans/{pid}/tasks").json["tasks"]] == [keep]
+    s = review(c, pid)["summary"]
+    assert (s["tasks"], s["done"], s["blocked"], s["actual"], s["planned"]) == (1, 0, 0, 0, 60)
+    assert c.get(f"/api/plans/{pid}").json["summary"]["completions"] == 0
+    assert c.get(f"/api/plans/{pid}/tasks").json["logs"] == []
+    # 휴지통에 있음 + 남은 날
+    tr = c.get(f"/api/plans/{pid}/trash").json
+    assert [t["id"] for t in tr["tasks"]] == [tid] and tr["tasks"][0]["days_left"] == 30 and tr["keep_days"] == 30
+    # 휴지통의 할 일은 고치거나 기록할 수 없음
+    assert c.patch(f"/api/tasks/{tid}", json={"title": "x"}).status_code == 404
+    assert c.post(f"/api/tasks/{tid}/logs", json=times(10)).status_code == 404
+    assert c.delete(f"/api/tasks/{tid}").status_code == 404           # 두 번 지우기 X
+    # 되돌리면 기록·완료까지 그대로 돌아옴
+    assert c.post(f"/api/tasks/{tid}/restore").json["deleted_at"] is None
+    assert review(c, pid)["summary"] == before
+    assert c.get(f"/api/plans/{pid}").json["summary"]["completions"] == 1
+    assert c.post(f"/api/tasks/{tid}/restore").status_code == 404       # 살아 있으면 되돌릴 것 없음
+
+
+def test_trash_permanent_delete(c):
+    pid = make_plan(c)
+    tid = make_task(c, pid, 30)
+    c.post(f"/api/tasks/{tid}/logs", json=times(10))
+    assert c.delete(f"/api/tasks/{tid}?permanent=1").status_code == 404    # 휴지통을 거쳐야 영구 삭제
+    c.delete(f"/api/tasks/{tid}")
+    assert c.delete(f"/api/tasks/{tid}?permanent=1").status_code == 204
+    assert c.get(f"/api/plans/{pid}/trash").json["tasks"] == []
+    assert index.app.config["DB"].t["logs"] == []                           # 딸린 기록도 실제로 지워짐
+    assert c.post(f"/api/tasks/{tid}/restore").status_code == 404
+
+
+def test_trash_purges_after_30_days(c):
+    pid = make_plan(c)
+    old, new = make_task(c, pid, 30, "오래된"), make_task(c, pid, 30, "최근")
+    fake = index.app.config["DB"]
+    for t in fake.t["tasks"]:
+        if t["id"] == old:
+            t["deleted_at"] = "2020-01-01T00:00:00+00:00"                  # 30일 훨씬 전
+    c.delete(f"/api/tasks/{new}")
+    ids = [t["id"] for t in c.get(f"/api/plans/{pid}/trash").json["tasks"]]
+    assert ids == [new] and all(t["id"] != old for t in fake.t["tasks"])
+
+
+# ---------------- 실행 기록: 예상보다 오래 걸린 경우 ----------------
+def test_log_longer_than_planned_is_ok(c):
+    pid = make_plan(c)
+    tid = make_task(c, pid, 60)                                             # 예상 1시간
+    r = c.post(f"/api/tasks/{tid}/logs", json={"started_at": "2026-10-01T09:00:00+09:00",
+                                                "ended_at": "2026-10-01T12:00:00+09:00", "actual_minutes": 170})
+    assert r.status_code == 201 and r.json["actual_minutes"] == 170          # 예상의 3배 가까이도 OK
+    r = c.post(f"/api/tasks/{tid}/logs", json={"started_at": "2026-10-01T09:00:00+09:00",
+                                                "ended_at": "2026-10-01T10:00:00+09:00", "actual_minutes": 90})
+    assert r.status_code == 400 and "시작 시각을 앞당기" in r.json["error"]   # 시작~끝보다 길면 할 일을 알려 줌

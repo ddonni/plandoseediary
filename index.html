@@ -174,7 +174,7 @@
     .task .tt { font-weight: 600; word-break: break-word; }
     .task.done .tt { text-decoration: line-through; color: var(--ink-soft); font-weight: 400; }
     .task .meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
-    .task .row-actions { display: flex; gap: 6px; }
+    .task .row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .small { font-size: 13px; padding: 4px 10px; border-radius: 6px; }
     .btn.danger { border-color: var(--error); color: var(--error); background: transparent; }
     .chip {
@@ -186,6 +186,38 @@
     .due-today { color: var(--medium); font-weight: 600; }
     .task-edit { grid-column: 2 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .task-edit .wide { grid-column: 1 / -1; }
+
+    /* ---------- 실행 기록 (카드 3) ---------- */
+    .log-form { grid-column: 1 / -1; background: #fbf8f1; border: 1px dashed var(--rule); border-radius: 8px; padding: 12px; }
+    .lf-title { margin: 0 0 8px; font-size: 14px; }
+    .lf-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px 12px; align-items: start; }
+    .lf-grid .wide { grid-column: 1 / -1; }
+    .lf-grid label.f { font-size: 12px; margin-bottom: 2px; }
+    .lf-grid textarea { min-height: 56px; }
+    input[type=datetime-local] { width: 100%; background: #fff; border: 1px solid var(--rule); border-radius: 8px; padding: 7px 8px; }
+    .check { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
+    .check input { width: 18px; height: 18px; accent-color: var(--accent); }
+    .span-hint { display: block; font-size: 12px; margin-top: 2px; }
+    .task-logs { margin-top: 6px; font-size: 13px; }
+    .task-logs summary { cursor: pointer; color: var(--accent); }
+    .log-list { list-style: none; margin: 6px 0 0; padding: 0; }
+    .log { border-left: 3px solid var(--accent-soft); padding: 4px 0 4px 10px; margin: 6px 0; font-size: 13px; }
+    .log.blocked { border-left-color: var(--high-bg); }
+    .log-top { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+    .log .when { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+    .log .for { color: var(--accent); font-weight: 600; }
+    .blocker { margin-top: 2px; }
+    .blocker span { font-size: 11px; font-weight: 600; color: var(--high); background: var(--high-bg); border-radius: 4px; padding: 0 5px; margin-right: 4px; }
+    h3.sub { font-size: 15px; margin: 18px 0 8px; }
+    h3.sub:first-of-type { margin-top: 4px; }
+    .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+    .stat { background: #fbf8f1; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+    .stat b { display: block; font-size: 18px; font-family: var(--serif); }
+    .stat span { font-size: 12px; color: var(--ink-soft); }
+    @media (max-width: 560px) {
+      .lf-grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
 
     @media (max-width: 560px) {
       .task-add { grid-template-columns: 1fr 1fr; }
@@ -207,7 +239,7 @@
 <div class="wrap">
   <header>
     <h1 class="brand"><a href="#/">플랜두씨 다이어리</a></h1>
-    <div class="flow"><b>Plan 계획</b> → <span class="later">Do 실제로 한 일</span> → <span class="later">See 돌아보기</span></div>
+    <div class="flow"><b>Plan 계획</b> → <b>Do 실제로 한 일</b> → <span class="later">See 돌아보기</span></div>
   </header>
 
   <p class="notice" role="note">
@@ -226,16 +258,30 @@ const app = document.getElementById('app');
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (ch) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
+// key: "한 번의 의도"를 나타내는 요청 키(Idempotency-Key).
+// 같은 키로 여러 번 보내도 서버는 한 번만 처리하고 처음 결과를 돌려준다.
 async function api(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (options.key) headers['Idempotency-Key'] = options.key;
   const res = await fetch('/api' + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
+    method: options.method || 'GET',
+    headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   let data = null;
   try { data = await res.json(); } catch { /* 본문 없음 */ }
+  // 409 = 같은 키의 요청을 서버가 지금 처리하는 중 → 이미 접수된 것이므로 오류가 아님
+  if (res.status === 409 && options.key) return null;
   if (!res.ok) throw new Error(data?.error || `요청 실패 (${res.status})`);
   return data;
+}
+
+function newKey() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 const PRIORITY = { high: '높음', medium: '보통', low: '낮음' };
@@ -427,6 +473,16 @@ async function showPlan(id, params = new URLSearchParams()) {
 
     ${tasksSection()}
 
+    <section class="sheet" id="do">
+      <div class="sec-head"><h2>실제로 한 일</h2>
+        <span class="muted">계획과 따로 저장 — 기록해도 계획·예상 시간은 그대로</span></div>
+      <h3 class="sub">돌아보기 집계</h3>
+      <div class="stats" id="do-stats"></div>
+      <p class="muted" style="margin:6px 0 0">완료는 할 일 하나당 한 번만 셉니다. 완료를 여러 번 눌러도, 되돌렸다 다시 완료해도 1건입니다.</p>
+      <h3 class="sub">실행 기록 <span class="muted">— 최근 것부터, 어느 할 일의 기록인지 함께</span></h3>
+      <ul class="log-list" id="do-logs"><li class="empty">불러오는 중…</li></ul>
+    </section>
+
     <section class="sheet">
       <h2>변경 이력</h2>
       <p class="muted" style="margin-top:-8px">처음 세운 계획부터 지금까지. 예전 내용은 고칠 수 없습니다.</p>
@@ -580,10 +636,12 @@ function initTasks(planId, params) {
   for (const id of ['tstatus', 'tpriority', 'tdue', 'ttag', 'tsort']) $(id).addEventListener('change', loadTasks);
 
   const add = $('task-add');
+  add.dataset.key = newKey();
   add.addEventListener('submit', async (e) => {
     e.preventDefault();
     await submit(add, async () => {
-      await api(`/plans/${planId}/tasks`, { method: 'POST', body: readTaskForm(add) });
+      await api(`/plans/${planId}/tasks`, { method: 'POST', key: add.dataset.key, body: readTaskForm(add) });
+      add.dataset.key = newKey();                   // 다음 할 일은 새 키
       add.reset();
       add.querySelector('[name=hours]').value = 1;
       add.querySelector('[name=minutes]').value = 0;
@@ -663,6 +721,7 @@ function dueText(t, today) {
 function renderTasks(res) {
   const q = res.query;
   lastTasks = res.tasks;
+  renderStats(res);
   fillSelect($('ttag'), [['', '전체'], ...res.tags.map((t) => [t, '#' + t])], q.tag);
   fillSelect($('tsort'), Object.entries(res.sorts), res.sort.key);
 
@@ -682,7 +741,7 @@ function renderTasks(res) {
     return;
   }
   list.innerHTML = res.tasks.map((t) => `
-    <li class="task ${t.status === 'done' ? 'done' : ''}" data-id="${t.id}">
+    <li class="task ${t.status === 'done' ? 'done' : ''}" data-id="${t.id}" data-key="${newKey()}">
       <input type="checkbox" data-act="toggle" ${t.status === 'done' ? 'checked' : ''}
              aria-label="${esc(t.title)} ${t.status === 'done' ? '완료됨 — 누르면 진행 중으로' : '완료로 바꾸기'}">
       <div>
@@ -693,12 +752,148 @@ function renderTasks(res) {
           <span>예상 ${fmtMinutes(t.planned_minutes)}</span>
           ${t.tags.map((g) => `<button type="button" class="chip ${g === q.tag ? 'on' : ''}" data-act="tag" data-tag="${esc(g)}">#${esc(g)}</button>`).join('')}
         </div>
+        ${taskLogs(t)}
       </div>
       <div class="row-actions">
+        ${t.status === 'done'
+          ? '<button type="button" class="btn ghost small" data-act="reopen">되돌리기</button>'
+          : '<button type="button" class="btn small" data-act="complete">완료</button>'}
+        <button type="button" class="btn ghost small" data-act="log">기록</button>
         <button type="button" class="btn ghost small" data-act="edit">고치기</button>
         <button type="button" class="btn danger small" data-act="delete">지우기</button>
       </div>
     </li>`).join('');
+}
+
+/* ----- 실행 기록 (카드 3) ----- */
+function fmtClock(ts) {
+  const d = new Date(ts);
+  return isNaN(d) ? '' : d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+function fmtDay(ts) {
+  const d = new Date(ts);
+  return isNaN(d) ? '' : `${d.getMonth() + 1}/${d.getDate()}`;
+}
+function logLine(l, { withTask = false } = {}) {
+  const when = l.started_at
+    ? `${fmtDay(l.started_at)} ${fmtClock(l.started_at)}–${fmtClock(l.ended_at)}`
+    : fmtDate(l.done_date);
+  return `
+    <li class="log ${l.blocker ? 'blocked' : ''}">
+      <div class="log-top">
+        <span class="when">${when}</span>
+        <span>실제 <b>${fmtMinutes(l.actual_minutes)}</b></span>
+        ${l.status === 'done' ? '<span class="badge ver">이 기록으로 완료</span>' : ''}
+        ${withTask ? `<span class="for">→ ${l.task_title ? esc(l.task_title) : '<i>계획에 없던 일</i>'}</span>` : ''}
+      </div>
+      ${l.blocker ? `<div class="blocker"><span>막힌 곳</span> ${esc(l.blocker)}</div>` : ''}
+      ${l.note ? `<div class="muted pre">${esc(l.note)}</div>` : ''}
+    </li>`;
+}
+function taskLogs(t) {
+  if (!t.logs.length) return '';
+  const total = t.logs.reduce((s, l) => s + l.actual_minutes, 0);
+  return `
+    <details class="task-logs">
+      <summary>실행 기록 ${t.logs.length}건 · 실제 ${fmtMinutes(total)}
+        <span class="muted">(예상 ${fmtMinutes(t.planned_minutes)})</span></summary>
+      <ul class="log-list">${t.logs.map((l) => logLine(l)).join('')}</ul>
+    </details>`;
+}
+
+// datetime-local 입력값(내 컴퓨터 시각) ↔ 시간대가 붙은 ISO 문자열
+function toLocalInput(d) {
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+function fromLocalInput(v) {
+  if (!v) return null;
+  const d = new Date(v);                      // 내 컴퓨터 시간대로 해석
+  return isNaN(d) ? null : d.toISOString();   // 서버에는 UTC(Z)로 보냄 → 시간대 손실 없음
+}
+
+function openLogForm(li, t) {
+  li.querySelector('.log-form')?.remove();
+  const end = new Date(); end.setSeconds(0, 0);
+  const start = new Date(end.getTime() - Math.min(t.planned_minutes, 240) * 60000);
+  const wrap = document.createElement('div');
+  wrap.className = 'log-form';
+  wrap.innerHTML = `
+    <form novalidate data-key="${newKey()}">
+      <p class="lf-title">실행 기록 — <b>${esc(t.title)}</b> <span class="muted">(예상 ${fmtMinutes(t.planned_minutes)}, 계획 값은 바뀌지 않습니다)</span></p>
+      <div class="lf-grid">
+        <div><label class="f">시작 시각 <span class="req">*</span></label>
+          <input name="started_at" type="datetime-local" required value="${toLocalInput(start)}"></div>
+        <div><label class="f">끝난 시각 <span class="req">*</span></label>
+          <input name="ended_at" type="datetime-local" required value="${toLocalInput(end)}"></div>
+        <div><span class="f" style="display:block;font-size:12px;font-weight:600">실제로 걸린 시간 <span class="req">*</span></span>
+          <div class="mins">
+            <input name="hours" type="number" min="0" max="24" aria-label="시간">시간
+            <input name="minutes" type="number" min="0" max="59" aria-label="분">분
+          </div>
+          <span class="muted span-hint"></span></div>
+        <div class="wide"><label class="f">막혔던 이유 <span class="hint">— 없었으면 비워 두세요</span></label>
+          <textarea name="blocker" maxlength="500" placeholder="예) Vercel 환경변수 URL 끝에 /rest/v1이 붙어 있어서 30분 헤맴"></textarea></div>
+        <div class="wide"><label class="f">메모 <span class="hint">(선택)</span></label>
+          <input name="note" type="text" maxlength="500"></div>
+        <label class="wide check"><input type="checkbox" name="complete" ${t.status === 'done' ? 'disabled' : ''}>
+          이 기록으로 할 일 완료 ${t.status === 'done' ? '<span class="muted">(이미 완료됨)</span>' : ''}</label>
+      </div>
+      <div class="actions" style="margin-top:8px">
+        <button class="btn small" type="submit">기록 저장</button>
+        <button class="btn ghost small" type="button" data-act="cancel-log">취소</button>
+        <span class="err" role="alert"></span>
+      </div>
+    </form>`;
+  li.appendChild(wrap);
+  const form = wrap.querySelector('form');
+  const [h, m] = [form.querySelector('[name=hours]'), form.querySelector('[name=minutes]')];
+  let touched = false;                           // 사람이 직접 고친 뒤에는 자동으로 덮어쓰지 않음
+  const sync = () => {
+    const s = new Date(form.started_at.value), e = new Date(form.ended_at.value);
+    const span = Math.round((e - s) / 60000);
+    form.querySelector('.span-hint').textContent =
+      isNaN(span) ? '' : span < 0 ? '끝난 시각이 시작보다 빠릅니다' : `시작~끝 ${fmtMinutes(span)} (쉰 시간이 있으면 줄이세요)`;
+    if (!touched && span >= 0) { h.value = Math.floor(span / 60); m.value = span % 60; }
+  };
+  form.started_at.addEventListener('input', sync);
+  form.ended_at.addEventListener('input', sync);
+  h.addEventListener('input', () => { touched = true; });
+  m.addEventListener('input', () => { touched = true; });
+  sync();
+  form.querySelector('[data-act=cancel-log]').onclick = (e) => { e.stopPropagation(); wrap.remove(); };
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submit(form, async () => {
+      const started_at = fromLocalInput(form.started_at.value), ended_at = fromLocalInput(form.ended_at.value);
+      if (!started_at || !ended_at) throw new Error('시작·끝난 시각을 모두 적어 주세요');
+      if (ended_at < started_at) throw new Error('끝난 시각이 시작보다 빠릅니다');
+      const actual = Number(h.value || 0) * 60 + Number(m.value || 0);
+      // form.dataset.key: 이 폼을 연 순간 정해진 키 → 저장을 몇 번 눌러도 기록은 1건
+      await api(`/tasks/${t.id}/logs`, {
+        method: 'POST', key: form.dataset.key,
+        body: { started_at, ended_at, actual_minutes: Math.round(actual),
+                blocker: form.blocker.value.trim() || null, note: form.note.value.trim() || null,
+                complete: form.complete.checked },
+      });
+      await loadTasks();
+    });
+  });
+  form.started_at.focus();
+}
+
+function renderStats(res) {
+  const s = res.summary;
+  const box = $('do-stats');
+  if (!box) return;
+  box.innerHTML = `
+    <div class="stat"><b>${s.completions}</b><span>완료</span></div>
+    <div class="stat"><b>${s.logs}</b><span>실행 기록</span></div>
+    <div class="stat"><b>${fmtMinutes(s.actual)}</b><span>실제 시간 합</span></div>
+    <div class="stat"><b>${fmtMinutes(s.planned)}</b><span>예상 시간 합</span></div>
+    <div class="stat"><b>${s.blocked}</b><span>막힘 기록</span></div>`;
+  $('do-logs').innerHTML = res.logs.length
+    ? res.logs.map((l) => logLine(l, { withTask: true })).join('')
+    : '<li class="empty">아직 실행 기록이 없습니다. 할 일의 <b>기록</b> 버튼으로 실제로 한 일을 남겨 보세요.</li>';
 }
 
 function taskOf(el) {
@@ -706,16 +901,28 @@ function taskOf(el) {
   return li && { li, task: lastTasks.find((t) => t.id === Number(li.dataset.id)) };
 }
 
-async function onTaskToggle(e) {
-  if (e.target.dataset.act !== 'toggle') return;
-  const { task } = taskOf(e.target);
-  e.target.disabled = true;
+// 상태(완료/되돌리기) 바꾸기 — 세 겹의 중복 방지 중 화면 쪽 두 겹:
+//  ① 같은 줄에서 나온 요청은 같은 키(li.dataset.key)를 쓴다 → 서버가 한 번만 처리
+//  ② 바꾼 직전 잠깐은 같은 할 일의 상태 클릭을 무시 → 연타가 '되돌리기'를 눌러버리는 일 방지
+//  (③ DB의 유일 인덱스가 마지막으로 막는다)
+const statusCooldown = new Map();
+async function setStatus(li, task, status, el) {
+  const now = Date.now();
+  if ((statusCooldown.get(task.id) || 0) > now) return loadTasks();
+  statusCooldown.set(task.id, now + 800);
+  el.disabled = true;
   try {
-    await api(`/tasks/${task.id}`, { method: 'PATCH', body: { status: e.target.checked ? 'done' : 'open' } });
+    await api(`/tasks/${task.id}`, { method: 'PATCH', key: li.dataset.key, body: { status } });
   } catch (err) {
     alert(err.message);
   }
   await loadTasks();
+}
+
+async function onTaskToggle(e) {
+  if (e.target.dataset.act !== 'toggle') return;
+  const { li, task } = taskOf(e.target);
+  await setStatus(li, task, e.target.checked ? 'done' : 'open', e.target);
 }
 
 async function onTaskClick(e) {
@@ -726,6 +933,10 @@ async function onTaskClick(e) {
     return loadTasks();
   }
   const { li, task } = taskOf(e.target);
+  if (act === 'complete' || act === 'reopen') {   // 체크박스와 같은 동작을 글자 버튼으로
+    return setStatus(li, task, act === 'complete' ? 'done' : 'open', e.target);
+  }
+  if (act === 'log') return openLogForm(li, task);
   if (act === 'delete') {
     if (!confirm(`"${task.title}" 할 일을 지울까요?\n딸린 실행 기록도 함께 지워집니다.`)) return;
     try { await api(`/tasks/${task.id}`, { method: 'DELETE' }); }

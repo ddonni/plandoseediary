@@ -18,6 +18,8 @@
 |---|---|
 | `schema.sql` | DB 스키마 (Supabase SQL Editor에서 처음 한 번 실행) |
 | `migrations/002_card1_plan_history.sql` | 카드 1: 우선순위·성공 기준·예상 시간 칸 + 수정 이력 표·트리거 |
+| `migrations/003_card2_tasks.sql` | 카드 2: 할 일에 마감일·우선순위·태그·완료 상태 |
+| `migrations/004_card3_logs_completions.sql` | 카드 3: 실행 기록 시각·막힌 이유, 완료 기록 표(할 일당 1건), 요청 키 표 |
 | `api/index.py` | 서버 API (Flask) |
 | `tests/test_api.py` | 가짜 DB로 돌리는 API 테스트 |
 | `index.html` | 화면 |
@@ -34,9 +36,12 @@
 | GET / DELETE | `/api/plans/{id}` | 계획 상세(할 일·기록·돌아보기·집계·출처 교훈) / 삭제 |
 | PATCH | `/api/plans/{id}` | 계획 고치기 (바뀐 칸 + `change_note` 필수). 고치기 전 내용은 DB 트리거가 이력에 보관 |
 | GET | `/api/plans/{id}/revisions` | 버전 1(처음 계획)부터 지금까지 |
-| POST | `/api/plans/{id}/tasks` | 할 일 추가 (예상 시간) |
+| GET | `/api/plans/{id}/tasks?q=&status=&priority=&tag=&due=&sort=` | 할 일 검색·거르기·정렬 (서버에서 처리) |
+| POST | `/api/plans/{id}/tasks` | 할 일 추가 (마감일·우선순위·태그·예상 시간) |
+| PATCH | `/api/tasks/{id}` | 할 일 고치기, 완료(`status: done`), 되돌리기(`status: open`) |
 | DELETE | `/api/tasks/{id}` | 할 일 삭제 (딸린 기록도 삭제) |
-| POST | `/api/plans/{id}/logs` | 실행 기록 추가 (`task_id` 없으면 계획에 없던 일, 메모 필수) |
+| POST | `/api/tasks/{id}/logs` | 할 일에 붙는 실행 기록 (시작·끝 시각, 실제 시간, 막힌 이유, `complete`) |
+| POST | `/api/plans/{id}/logs` | 계획에 없던 일 기록 (메모 필수) |
 | DELETE | `/api/logs/{id}` | 실행 기록 삭제 |
 | PUT | `/api/plans/{id}/review` | 돌아보기 쓰기/덮어쓰기 |
 | GET | `/api/stats` | 전체 집계 + 돌아보기 패턴 개수 |
@@ -52,6 +57,33 @@
 | `in_progress` | 기록은 있는데 아직 완료 기록 없음 |
 | `skipped` | 건너뜀 기록만 있음 |
 | `pending` | 기록 없음 |
+
+## 할 일 정렬 규칙
+
+검색·거르기·정렬은 모두 서버(`/api/plans/{id}/tasks`)에서 하고, 화면은 받은 순서대로 그립니다.
+모든 규칙의 마지막 기준은 **먼저 만든 순(id)** 이라 값이 같은 할 일이 있어도 순서가 항상 같습니다.
+
+| sort | 순서 |
+|---|---|
+| `due` (기본) | 마감일 빠른 순(없으면 맨 뒤) → 우선순위 높은 순 → 먼저 만든 순 |
+| `priority` | 우선순위 높은 순 → 마감일 빠른 순 → 먼저 만든 순 |
+| `minutes` | 예상 시간 긴 순 → 우선순위 높은 순 → 먼저 만든 순 |
+| `title` | 이름 가나다순(대소문자 무시) → 먼저 만든 순 |
+| `recent` | 최근에 만든 순 |
+
+'오늘'·'지난 마감'은 한국 날짜(UTC+9) 기준입니다.
+
+## 완료가 두 번 쌓이지 않는 방식 (세 겹)
+
+1. **같은 요청 키** — 화면은 한 번의 의도(완료 누르기, 기록 저장, 할 일 추가)마다 `Idempotency-Key`(UUID)를 붙인다.
+   서버는 키를 먼저 `request_keys` 표에 넣어 '찜'하고, 같은 키가 또 오면 일을 다시 하지 않고 처음 응답을 돌려준다(`Idempotent-Replay: true`).
+   동시에 온 같은 키 요청은 하나만 실행되고 나머지는 409(처리 중)를 받는다.
+2. **DB 제약** — 완료 기록(`task_completions`)은 DB 트리거가 할 일 상태가 진행 중→완료로 *바뀔 때만* 만든다.
+   여기에 `task_completions_one_active` 유일 인덱스가 할 일 하나당 '살아 있는' 완료 기록을 1건으로 묶는다.
+   그래서 키가 다른 요청 8개가 동시에 와도 완료 기록은 1건이다.
+3. **화면 잠금** — 버튼 비활성화와 0.8초 연타 무시는 편의일 뿐, 위 두 겹이 없어도 되는 장치가 아니다.
+
+되돌리기를 하면 완료 기록을 지우지 않고 `revoked_at`을 찍어 집계에서 뺀다.
 
 ## 계획 수정 이력이 남는 방식
 

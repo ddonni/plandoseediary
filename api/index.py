@@ -12,7 +12,7 @@
 import os
 import re
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 from flask import Flask, jsonify, request
@@ -62,7 +62,12 @@ PG_ERRORS = {
 
 class Supabase:
     def __init__(self, url: str, key: str, timeout: float = 8):
-        self.base = url.rstrip("/") + "/rest/v1/"
+        # Data API 화면에서 복사하면 끝에 /rest/v1이 붙어 오는 경우가 있어 정리한다
+        url = url.strip().rstrip("/")
+        if url.endswith("/rest/v1"):
+            url = url[: -len("/rest/v1")]
+        self.base = url + "/rest/v1/"
+        key = key.strip()  # 붙여넣을 때 섞인 공백·줄바꿈 제거
         self.timeout = timeout
         self.headers = {"apikey": key, "Content-Type": "application/json"}
         if key.startswith("eyJ"):  # 예전 JWT 형식 키는 Authorization도 필요
@@ -91,7 +96,13 @@ class Supabase:
                 raise ApiError(*PG_ERRORS[code])
             if r.status_code in (401, 403):
                 raise ApiError(500, "서버의 데이터베이스 키 설정이 잘못되었습니다")
-            raise ApiError(502, "데이터베이스 요청이 실패했습니다")
+            if code in ("PGRST205", "42P01") or r.status_code == 404:
+                raise ApiError(502, f"데이터베이스에 '{table}' 표가 없습니다. "
+                                    f"SUPABASE_URL과 SQL 실행 여부를 확인하세요 (HTTP {r.status_code} {code})")
+            if code == "42703":
+                raise ApiError(502, "데이터베이스에 필요한 칸이 없습니다. 추가 SQL(migrations)을 실행했는지 확인하세요")
+            # 원인 코드(표 이름·HTTP 상태·오류 코드)만 보여주고 상세 문장은 로그에만 남긴다
+            raise ApiError(502, f"데이터베이스 요청이 실패했습니다 (HTTP {r.status_code} {code})".strip())
         return r.json() if r.content else []
 
     def select(self, table, order="id", **eq):
@@ -219,11 +230,11 @@ KINDS = {
 }
 
 
-def verdict(planned: int, logs: list) -> str:
+def verdict(planned: int, logs: list, done: bool) -> str:
+    """done = 할 일 상태가 '완료'인지 (카드 2부터 체크박스가 기준)"""
     if not logs:
         return "pending"
     actual = sum(l["actual_minutes"] for l in logs)
-    done = any(l["status"] == "done" for l in logs)
     if actual > planned * OVER_RATIO:
         return "over"                       # 끝났든 아니든 이미 초과
     if not done:
@@ -242,11 +253,12 @@ def progress(tasks: list, logs: list) -> list:
     for t in tasks:
         ls = by_task[t["id"]]
         actual = sum(l["actual_minutes"] for l in ls)
+        done = t.get("status") == "done"
         out.append({**t,
                     "actual_minutes": actual,
                     "diff_minutes": actual - t["planned_minutes"],
-                    "is_done": any(l["status"] == "done" for l in ls),
-                    "verdict": verdict(t["planned_minutes"], ls)})
+                    "is_done": done,
+                    "verdict": verdict(t["planned_minutes"], ls, done)})
     return out
 
 
@@ -291,7 +303,7 @@ def summary(prog: list, logs: list) -> dict:
 
 def load(plan_id=None):
     f = {} if plan_id is None else {"plan_id": plan_id}
-    tasks = db().select("tasks", order="planned_date.asc.nullslast,id", **f)
+    tasks = db().select("tasks", order="due_date.asc.nullslast,id", **f)
     logs = db().select("logs", order="done_date.desc,id.desc", **f)
     return tasks, logs
 
@@ -407,17 +419,68 @@ def delete_plan(plan_id):
 
 
 # --- Plan의 할 일 ---------------------------------------------------------
+TASK_STATUSES = {"open", "done"}          # open = 진행 중
+PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+KST = timezone(timedelta(hours=9))         # '오늘'은 한국 날짜 기준 (서버는 UTC로 돈다)
+
+
+def tags_field(d, key="tags"):
+    """["API", "백엔드"] 또는 "API, 백엔드" 모두 받는다. 앞뒤 공백·중복 제거, 순서 유지."""
+    v = d.get(key)
+    if v is None:
+        return []
+    if isinstance(v, str):
+        v = v.split(",")
+    if not isinstance(v, list) or not all(isinstance(t, str) for t in v):
+        raise ApiError(400, f"{key}: 글자 목록으로 보내 주세요")
+    out = []
+    for t in (t.strip().lstrip("#") for t in v):
+        if not t:
+            continue
+        if len(t) > 20:
+            raise ApiError(400, f"{key}: 태그 하나는 20자 이하로 써 주세요")
+        if t not in out:
+            out.append(t)
+    if len(out) > 10:
+        raise ApiError(400, f"{key}: 태그는 10개까지 붙일 수 있습니다")
+    return out
+
+
+def task_fields(d: dict, partial: bool) -> dict:
+    checks = {
+        "title":           lambda: text(d, "title", 100, required=True),
+        "due_date":        lambda: iso_date(d, "due_date", required=False),
+        "priority":        lambda: choice(d, "priority", PRIORITIES) if "priority" in d else "medium",
+        "tags":            lambda: tags_field(d),
+        "planned_minutes": lambda: integer(d, "planned_minutes", 1, 1440),
+    }
+    row = {k: f() for k, f in checks.items() if not partial or k in d}
+    if partial and "status" in d:
+        row["status"] = choice(d, "status", TASK_STATUSES)
+        row["done_at"] = datetime.now(timezone.utc).isoformat() if row["status"] == "done" else None
+    return row
+
+
 @app.post("/api/plans/<int:plan_id>/tasks")
 def create_task(plan_id):
     get_one("plans", plan_id)
-    d = body()
-    row = {
-        "plan_id": plan_id,
-        "title": text(d, "title", 100, required=True),
-        "planned_date": iso_date(d, "planned_date", required=False),
-        "planned_minutes": integer(d, "planned_minutes", 1, 1440),
-    }
+    row = {"plan_id": plan_id, **task_fields(body(), partial=False)}
     return jsonify(db().insert("tasks", row)), 201
+
+
+@app.patch("/api/tasks/<int:task_id>")
+def update_task(task_id):
+    """내용 고치기, 완료로 바꾸기(status=done), 되돌리기(status=open) 모두 여기서."""
+    current = get_one("tasks", task_id)
+    changes = task_fields(body(), partial=True)
+    if not changes:
+        raise ApiError(400, "고칠 칸을 하나 이상 보내 주세요")
+    if changes.get("status") == current["status"]:   # 이미 그 상태면 완료 시각을 건드리지 않음
+        changes.pop("status")
+        changes.pop("done_at")
+    if not changes:
+        return jsonify(current)
+    return jsonify(db().update("tasks", changes, id=task_id)[0])
 
 
 @app.delete("/api/tasks/<int:task_id>")
@@ -425,6 +488,106 @@ def delete_task(task_id):
     if not db().delete("tasks", id=task_id):
         raise ApiError(404, "해당 항목이 없습니다")
     return "", 204
+
+
+# 정렬 규칙: 화면에 그대로 보여줄 설명 + 실제 비교 열쇠.
+# 모든 규칙의 마지막 열쇠는 id(만든 순서, 절대 겹치지 않음)라서
+# 값이 같은 할 일이 있어도 순서가 매번 똑같이 나온다.
+def _due_key(t):
+    return (t["due_date"] is None, t["due_date"] or "")
+
+
+SORTS = {
+    "due": {
+        "label": "마감일 빠른 순",
+        "steps": ["마감일 빠른 순 (마감일 없으면 맨 뒤)", "우선순위 높은 순", "먼저 만든 순"],
+        "key": lambda t: (*_due_key(t), PRIORITY_RANK[t["priority"]], t["id"]),
+    },
+    "priority": {
+        "label": "우선순위 높은 순",
+        "steps": ["우선순위 높은 순", "마감일 빠른 순 (마감일 없으면 맨 뒤)", "먼저 만든 순"],
+        "key": lambda t: (PRIORITY_RANK[t["priority"]], *_due_key(t), t["id"]),
+    },
+    "minutes": {
+        "label": "예상 시간 긴 순",
+        "steps": ["예상 시간 긴 순", "우선순위 높은 순", "먼저 만든 순"],
+        "key": lambda t: (-t["planned_minutes"], PRIORITY_RANK[t["priority"]], t["id"]),
+    },
+    "title": {
+        "label": "이름 가나다순",
+        "steps": ["이름 가나다순 (대소문자 무시)", "먼저 만든 순"],
+        "key": lambda t: (t["title"].casefold(), t["id"]),
+    },
+    "recent": {
+        "label": "최근에 만든 순",
+        "steps": ["최근에 만든 순"],
+        "key": lambda t: -t["id"],
+    },
+}
+DUE_FILTERS = {"all", "overdue", "today", "week", "none"}
+
+
+def due_matches(t, due, today):
+    d = t["due_date"]
+    if due == "all":
+        return True
+    if due == "none":
+        return d is None
+    if d is None:
+        return False
+    d = date.fromisoformat(d)
+    if due == "overdue":
+        return d < today and t["status"] != "done"
+    if due == "today":
+        return d == today
+    return today <= d <= today + timedelta(days=6)   # week: 오늘부터 7일 안
+
+
+@app.get("/api/plans/<int:plan_id>/tasks")
+def list_tasks(plan_id):
+    """검색·거르기·정렬을 모두 서버에서 한다. 화면은 받은 순서를 그대로 그린다.
+    ?q=글자 &status=all|open|done &priority=all|high|medium|low &tag=태그
+    &due=all|overdue|today|week|none &sort=due|priority|minutes|title|recent"""
+    get_one("plans", plan_id)
+    a = request.args
+    q = a.get("q", "").strip().casefold()
+    status = a.get("status", "all")
+    priority = a.get("priority", "all")
+    tag = a.get("tag", "").strip()
+    due = a.get("due", "all")
+    sort = a.get("sort", "due")
+    if status not in TASK_STATUSES | {"all"}:
+        raise ApiError(400, "status: all, open, done 중 하나여야 합니다")
+    if priority not in PRIORITIES | {"all"}:
+        raise ApiError(400, "priority: all, high, medium, low 중 하나여야 합니다")
+    if due not in DUE_FILTERS:
+        raise ApiError(400, f"due: {', '.join(sorted(DUE_FILTERS))} 중 하나여야 합니다")
+    if sort not in SORTS:
+        raise ApiError(400, f"sort: {', '.join(SORTS)} 중 하나여야 합니다")
+
+    tasks, logs = load(plan_id)
+    prog = progress(tasks, logs)
+    today = datetime.now(KST).date()
+
+    def keep(t):
+        if q and q not in t["title"].casefold() and not any(q in g.casefold() for g in t["tags"]):
+            return False
+        if status != "all" and t["status"] != status:
+            return False
+        if priority != "all" and t["priority"] != priority:
+            return False
+        if tag and tag not in t["tags"]:
+            return False
+        return due_matches(t, due, today)
+
+    shown = sorted(filter(keep, prog), key=SORTS[sort]["key"])
+    all_tags = sorted({g for t in prog for g in t["tags"]}, key=str.casefold)
+    return jsonify(
+        tasks=shown, total=len(prog), shown=len(shown), tags=all_tags, today=today.isoformat(),
+        query={"q": a.get("q", ""), "status": status, "priority": priority, "tag": tag, "due": due},
+        sort={"key": sort, "label": SORTS[sort]["label"], "steps": SORTS[sort]["steps"]},
+        sorts={k: v["label"] for k, v in SORTS.items()},
+    )
 
 
 # --- Do: 실행 기록 ----------------------------------------------------------

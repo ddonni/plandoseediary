@@ -137,6 +137,64 @@
     .empty { color: var(--ink-soft); padding: 8px 0; }
     .status { padding: 30px 0; text-align: center; color: var(--ink-soft); }
 
+    /* ---------- 할 일 (카드 2) ---------- */
+    .sec-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    .sec-head h2 { margin-bottom: 10px; }
+    select {
+      background: #fff; border: 1px solid var(--rule); border-radius: 8px; padding: 7px 8px; max-width: 100%;
+    }
+    .task-add {
+      display: grid; grid-template-columns: 1fr auto auto; gap: 8px 12px; align-items: end;
+      background: #fbf8f1; border: 1px dashed var(--rule); border-radius: 8px; padding: 12px; margin-bottom: 16px;
+    }
+    .task-add .wide { grid-column: 1 / -1; }
+    .task-add .row2 { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: end; }
+    .task-add label.f, .task-edit label.f { font-size: 12px; margin-bottom: 2px; }
+    .mins { display: flex; gap: 4px; align-items: center; white-space: nowrap; }
+    .mins input { width: 58px; }
+
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .toolbar input[type=search] {
+      flex: 1 1 180px; background: #fff; border: 1px solid var(--rule); border-radius: 8px; padding: 7px 10px;
+    }
+    .toolbar label { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--ink-soft); }
+    .sort-rule {
+      margin: 10px 0 4px; font-size: 13px; color: var(--ink-soft);
+      border-top: 1px solid var(--line); padding-top: 8px;
+    }
+    .sort-rule b { color: var(--ink); font-weight: 600; }
+    .linklike { background: none; border: 0; color: var(--accent); text-decoration: underline; cursor: pointer; padding: 0; font-size: 13px; }
+
+    .task-list { list-style: none; margin: 0; padding: 0; }
+    .task {
+      display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
+      padding: 12px 2px; border-bottom: 1px dashed var(--rule);
+    }
+    .task input[type=checkbox] { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); cursor: pointer; }
+    .task .tt { font-weight: 600; word-break: break-word; }
+    .task.done .tt { text-decoration: line-through; color: var(--ink-soft); font-weight: 400; }
+    .task .meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+    .task .row-actions { display: flex; gap: 6px; }
+    .small { font-size: 13px; padding: 4px 10px; border-radius: 6px; }
+    .btn.danger { border-color: var(--error); color: var(--error); background: transparent; }
+    .chip {
+      border: 1px solid var(--rule); background: #fff; border-radius: 999px; padding: 0 8px;
+      font-size: 12px; color: var(--ink); cursor: pointer;
+    }
+    .chip:hover, .chip.on { border-color: var(--accent); color: var(--accent); }
+    .due-late { color: var(--error); font-weight: 600; }
+    .due-today { color: var(--medium); font-weight: 600; }
+    .task-edit { grid-column: 2 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .task-edit .wide { grid-column: 1 / -1; }
+
+    @media (max-width: 560px) {
+      .task-add { grid-template-columns: 1fr 1fr; }
+      .task-add .row2 { grid-template-columns: 1fr; }
+      .task { grid-template-columns: auto 1fr; }
+      .task .row-actions { grid-column: 2; }
+      .task-edit { grid-column: 1 / -1; grid-template-columns: 1fr; }
+    }
+
     @media (max-width: 560px) {
       .grid { grid-template-columns: 1fr; }
       dl.facts { grid-template-columns: 1fr; gap: 2px; }
@@ -337,7 +395,7 @@ async function showHome() {
 }
 
 /* ===================== 화면 2: 계획 상세 + 고치기 + 이력 ===================== */
-async function showPlan(id) {
+async function showPlan(id, params = new URLSearchParams()) {
   app.innerHTML = '<p class="status">불러오는 중…</p>';
   const [{ plan }, { versions }] = await Promise.all([api(`/plans/${id}`), api(`/plans/${id}/revisions`)]);
 
@@ -367,6 +425,8 @@ async function showPlan(id) {
       ${planForm(plan, { edit: true })}
     </section>
 
+    ${tasksSection()}
+
     <section class="sheet">
       <h2>변경 이력</h2>
       <p class="muted" style="margin-top:-8px">처음 세운 계획부터 지금까지. 예전 내용은 고칠 수 없습니다.</p>
@@ -390,9 +450,11 @@ async function showPlan(id) {
       if (!Object.keys(changes).length) throw new Error('바뀐 내용이 없습니다');
       if (!data.change_note) throw new Error('고친 이유를 적어 주세요');
       await api(`/plans/${id}`, { method: 'PATCH', body: { ...changes, change_note: data.change_note } });
-      await showPlan(id);
+      await showPlan(id, currentTaskParams());
     });
   });
+
+  initTasks(id, params);
 }
 
 function timeline(versions) {
@@ -426,10 +488,296 @@ function timeline(versions) {
   return `<ol class="timeline">${items.reverse().join('')}</ol>`;
 }
 
+/* ===================== 할 일 (카드 2) =====================
+   검색·거르기·정렬은 전부 서버(/api/plans/{id}/tasks)가 한다.
+   화면은 조건을 보내고, 받은 순서 그대로 그리기만 한다.            */
+const TASK_DEFAULTS = { q: '', status: 'all', priority: 'all', tag: '', due: 'all', sort: 'due' };
+const DUE_LABEL = { all: '전체', overdue: '지난 마감', today: '오늘 마감', week: '7일 안', none: '마감 없음' };
+let tasksPlanId = null;
+let taskReq = 0;          // 늦게 도착한 옛 응답을 버리기 위한 번호
+let lastTasks = [];
+
+function tasksSection() {
+  return `
+  <section class="sheet" id="tasks">
+    <div class="sec-head"><h2>할 일</h2><span class="muted" id="task-count"></span></div>
+
+    <form id="task-add" class="task-add" novalidate>
+      <div class="wide">
+        <label class="f" for="ta-title">할 일 <span class="req">*</span></label>
+        <input id="ta-title" name="title" type="text" maxlength="100" placeholder="예) 할 일 API 붙이기">
+      </div>
+      <div>
+        <label class="f" for="ta-due">마감일</label>
+        <input id="ta-due" name="due_date" type="date">
+      </div>
+      <div>
+        <label class="f" for="ta-prio">우선순위</label>
+        <select id="ta-prio" name="priority">
+          <option value="high">높음</option><option value="medium" selected>보통</option><option value="low">낮음</option>
+        </select>
+      </div>
+      <div>
+        <span class="f" style="display:block;font-size:12px;font-weight:600;margin-bottom:2px">예상 시간 <span class="req">*</span></span>
+        <div class="mins">
+          <input name="hours" type="number" min="0" max="24" value="1" aria-label="시간">시간
+          <input name="minutes" type="number" min="0" max="59" step="5" value="0" aria-label="분">분
+        </div>
+      </div>
+      <div class="row2">
+        <div style="grid-column: 1 / 3">
+          <label class="f" for="ta-tags">태그 <span class="hint">— 쉼표로 구분</span></label>
+          <input id="ta-tags" name="tags" type="text" placeholder="예) 백엔드, API">
+        </div>
+        <button class="btn" type="submit">할 일 추가</button>
+      </div>
+      <span class="err wide" role="alert"></span>
+    </form>
+
+    <div class="toolbar" role="search">
+      <input type="search" id="tq" placeholder="제목·태그 검색" aria-label="할 일 검색">
+      <label>상태 <select id="tstatus">
+        <option value="all">전체</option><option value="open">진행 중</option><option value="done">완료</option>
+      </select></label>
+      <label>우선순위 <select id="tpriority">
+        <option value="all">전체</option><option value="high">높음</option><option value="medium">보통</option><option value="low">낮음</option>
+      </select></label>
+      <label>마감 <select id="tdue">
+        ${Object.entries(DUE_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
+      </select></label>
+      <label>태그 <select id="ttag"><option value="">전체</option></select></label>
+      <label>정렬 <select id="tsort"></select></label>
+    </div>
+    <p class="sort-rule" id="sort-rule"></p>
+    <ul class="task-list" id="task-list"><li class="empty">불러오는 중…</li></ul>
+  </section>`;
+}
+
+const $ = (id) => document.getElementById(id);
+
+function currentTaskParams() {
+  const p = new URLSearchParams();
+  if (!$('tq')) return p;
+  const now = { q: $('tq').value.trim(), status: $('tstatus').value, priority: $('tpriority').value,
+                tag: $('ttag').value, due: $('tdue').value, sort: $('tsort').value || 'due' };
+  for (const [k, v] of Object.entries(now)) if (v !== TASK_DEFAULTS[k]) p.set(k, v);
+  return p;
+}
+
+function initTasks(planId, params) {
+  tasksPlanId = planId;
+  const get = (k) => params.get(k) ?? TASK_DEFAULTS[k];
+  $('tq').value = get('q');
+  $('tstatus').value = get('status');
+  $('tpriority').value = get('priority');
+  $('tdue').value = get('due');
+  // 태그·정렬 목록은 서버 응답을 받은 뒤 채우므로 원하는 값을 먼저 기억해 둔다
+  $('ttag').dataset.want = get('tag');
+  $('tsort').dataset.want = get('sort');
+
+  let timer;
+  $('tq').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(loadTasks, 250); });
+  for (const id of ['tstatus', 'tpriority', 'tdue', 'ttag', 'tsort']) $(id).addEventListener('change', loadTasks);
+
+  const add = $('task-add');
+  add.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submit(add, async () => {
+      await api(`/plans/${planId}/tasks`, { method: 'POST', body: readTaskForm(add) });
+      add.reset();
+      add.querySelector('[name=hours]').value = 1;
+      add.querySelector('[name=minutes]').value = 0;
+      $('ta-title').focus();
+      await loadTasks();
+    });
+  });
+
+  $('task-list').addEventListener('click', onTaskClick);
+  $('task-list').addEventListener('change', onTaskToggle);
+  $('sort-rule').addEventListener('click', (e) => { if (e.target.id === 'reset-filters') resetFilters(); });
+  loadTasks();
+}
+
+function readTaskForm(form) {
+  const f = new FormData(form);
+  const title = (f.get('title') || '').trim();
+  const minutes = Number(f.get('hours') || 0) * 60 + Number(f.get('minutes') || 0);
+  if (!title) throw new Error('할 일을 적어 주세요');
+  if (!(minutes >= 1 && minutes <= 1440)) throw new Error('예상 시간은 1분~24시간 사이로 적어 주세요');
+  return {
+    title,
+    due_date: f.get('due_date') || null,
+    priority: f.get('priority'),
+    planned_minutes: Math.round(minutes),
+    tags: (f.get('tags') || '').split(',').map((t) => t.trim()).filter(Boolean),
+  };
+}
+
+function resetFilters() {
+  $('tq').value = ''; $('tstatus').value = 'all'; $('tpriority').value = 'all';
+  $('tdue').value = 'all'; $('ttag').value = ''; $('ttag').dataset.want = '';
+  loadTasks();
+}
+
+async function loadTasks() {
+  const my = ++taskReq;
+  const params = currentTaskParams();
+  for (const id of ['ttag', 'tsort']) {          // 아직 목록이 안 채워졌으면 기억해 둔 값을 보낸다
+    const want = $(id).dataset.want;
+    const key = id === 'ttag' ? 'tag' : 'sort';
+    if (want !== undefined && want !== TASK_DEFAULTS[key]) params.set(key, want);
+  }
+  // 주소창에도 조건을 남겨 둔다 → 새로고침·링크 공유해도 같은 화면
+  const qs = params.toString();
+  history.replaceState(null, '', `#/plan/${tasksPlanId}${qs ? '?' + qs : ''}`);
+
+  let res;
+  try {
+    res = await api(`/plans/${tasksPlanId}/tasks?${qs}`);
+  } catch (e) {
+    if (my === taskReq) $('task-list').innerHTML = `<li class="err">${esc(e.message)}</li>`;
+    return;
+  }
+  if (my !== taskReq) return;                      // 더 새 요청이 있으면 이 응답은 버림
+  renderTasks(res);
+}
+
+function fillSelect(sel, options, value) {
+  sel.innerHTML = options.map(([v, label]) =>
+    `<option value="${esc(v)}" ${v === value ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  delete sel.dataset.want;
+}
+
+function dueText(t, today) {
+  if (!t.due_date) return '<span>마감 없음</span>';
+  const diff = Math.round((new Date(t.due_date) - new Date(today)) / 86400000);
+  let tag = '';
+  if (t.status !== 'done') {
+    if (diff < 0) tag = ` <span class="due-late">${-diff}일 지남</span>`;
+    else if (diff === 0) tag = ' <span class="due-today">오늘</span>';
+    else tag = ` <span>D-${diff}</span>`;
+  }
+  return `<span>마감 ${fmtDate(t.due_date)}${tag}</span>`;
+}
+
+function renderTasks(res) {
+  const q = res.query;
+  lastTasks = res.tasks;
+  fillSelect($('ttag'), [['', '전체'], ...res.tags.map((t) => [t, '#' + t])], q.tag);
+  fillSelect($('tsort'), Object.entries(res.sorts), res.sort.key);
+
+  const filtered = q.q || q.status !== 'all' || q.priority !== 'all' || q.tag || q.due !== 'all';
+  $('task-count').textContent = filtered ? `${res.total}개 중 ${res.shown}개 표시` : `모두 ${res.total}개`;
+  $('sort-rule').innerHTML =
+    `<b>정렬 기준</b> · ${res.sort.steps.map(esc).join(' → 같으면 ')}` +
+    (filtered ? ` · <button type="button" class="linklike" id="reset-filters">조건 초기화</button>` : '');
+
+  const list = $('task-list');
+  if (!res.total) {
+    list.innerHTML = '<li class="empty">아직 할 일이 없습니다. 위에서 이 계획의 할 일을 하나씩 넣어 보세요.</li>';
+    return;
+  }
+  if (!res.shown) {
+    list.innerHTML = '<li class="empty">조건에 맞는 할 일이 없습니다.</li>';
+    return;
+  }
+  list.innerHTML = res.tasks.map((t) => `
+    <li class="task ${t.status === 'done' ? 'done' : ''}" data-id="${t.id}">
+      <input type="checkbox" data-act="toggle" ${t.status === 'done' ? 'checked' : ''}
+             aria-label="${esc(t.title)} ${t.status === 'done' ? '완료됨 — 누르면 진행 중으로' : '완료로 바꾸기'}">
+      <div>
+        <div class="tt">${esc(t.title)}</div>
+        <div class="meta">
+          ${dueText(t, res.today)}
+          <span class="badge ${esc(t.priority)}">${PRIORITY[t.priority] ?? ''}</span>
+          <span>예상 ${fmtMinutes(t.planned_minutes)}</span>
+          ${t.tags.map((g) => `<button type="button" class="chip ${g === q.tag ? 'on' : ''}" data-act="tag" data-tag="${esc(g)}">#${esc(g)}</button>`).join('')}
+        </div>
+      </div>
+      <div class="row-actions">
+        <button type="button" class="btn ghost small" data-act="edit">고치기</button>
+        <button type="button" class="btn danger small" data-act="delete">지우기</button>
+      </div>
+    </li>`).join('');
+}
+
+function taskOf(el) {
+  const li = el.closest('li.task');
+  return li && { li, task: lastTasks.find((t) => t.id === Number(li.dataset.id)) };
+}
+
+async function onTaskToggle(e) {
+  if (e.target.dataset.act !== 'toggle') return;
+  const { task } = taskOf(e.target);
+  e.target.disabled = true;
+  try {
+    await api(`/tasks/${task.id}`, { method: 'PATCH', body: { status: e.target.checked ? 'done' : 'open' } });
+  } catch (err) {
+    alert(err.message);
+  }
+  await loadTasks();
+}
+
+async function onTaskClick(e) {
+  const act = e.target.dataset.act;
+  if (!act || act === 'toggle') return;
+  if (act === 'tag') {                 // 태그를 누르면 그 태그로 거르기
+    $('ttag').value = e.target.dataset.tag;
+    return loadTasks();
+  }
+  const { li, task } = taskOf(e.target);
+  if (act === 'delete') {
+    if (!confirm(`"${task.title}" 할 일을 지울까요?\n딸린 실행 기록도 함께 지워집니다.`)) return;
+    try { await api(`/tasks/${task.id}`, { method: 'DELETE' }); }
+    catch (err) { alert(err.message); }
+    return loadTasks();
+  }
+  if (act === 'edit') openTaskEdit(li, task);
+}
+
+function openTaskEdit(li, t) {
+  li.innerHTML = `
+    <form class="task-edit" novalidate>
+      <div class="wide">
+        <label class="f">할 일</label>
+        <input name="title" type="text" maxlength="100" value="${esc(t.title)}">
+      </div>
+      <div><label class="f">마감일</label><input name="due_date" type="date" value="${esc(t.due_date || '')}"></div>
+      <div><label class="f">우선순위</label>
+        <select name="priority">${['high', 'medium', 'low'].map((k) =>
+          `<option value="${k}" ${t.priority === k ? 'selected' : ''}>${PRIORITY[k]}</option>`).join('')}</select></div>
+      <div><span class="f" style="display:block;font-size:12px;font-weight:600">예상 시간</span>
+        <div class="mins">
+          <input name="hours" type="number" min="0" max="24" value="${Math.floor(t.planned_minutes / 60)}" aria-label="시간">시간
+          <input name="minutes" type="number" min="0" max="59" step="5" value="${t.planned_minutes % 60}" aria-label="분">분
+        </div></div>
+      <div><label class="f">태그 (쉼표로 구분)</label><input name="tags" type="text" value="${esc(t.tags.join(', '))}"></div>
+      <div class="actions wide" style="margin-top:4px">
+        <button class="btn small" type="submit">저장</button>
+        <button class="btn ghost small" type="button" data-act="cancel">취소</button>
+        <span class="err" role="alert"></span>
+      </div>
+    </form>`;
+  const form = li.querySelector('form');
+  li.querySelector('[data-act=cancel]').onclick = (e) => { e.stopPropagation(); loadTasks(); };
+  form.querySelector('[name=title]').focus();
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submit(form, async () => {
+      const data = readTaskForm(form);
+      // 바뀐 칸만 보낸다
+      const changes = Object.fromEntries(Object.entries(data).filter(([k, v]) =>
+        JSON.stringify(v) !== JSON.stringify(t[k] ?? null)));
+      if (Object.keys(changes).length) await api(`/tasks/${t.id}`, { method: 'PATCH', body: changes });
+      await loadTasks();
+    });
+  });
+}
+
 /* ===================== 제출 공통 처리 ===================== */
 async function submit(form, work) {
   const btn = form.querySelector('button[type=submit]');
-  const err = form.querySelector('#form-err');
+  const err = form.querySelector('.err');
   err.textContent = '';
   btn.disabled = true;
   try { await work(); }
@@ -439,9 +787,9 @@ async function submit(form, work) {
 
 /* ===================== 주소(#) 따라 화면 고르기 ===================== */
 async function route() {
-  const m = location.hash.match(/^#\/plan\/(\d+)$/);
+  const m = location.hash.match(/^#\/plan\/(\d+)(?:\?(.*))?$/);
   try {
-    if (m) await showPlan(Number(m[1]));
+    if (m) await showPlan(Number(m[1]), new URLSearchParams(m[2] || ''));
     else await showHome();
   } catch (e) {
     app.innerHTML = `<section class="sheet"><h2>불러오지 못했습니다</h2>

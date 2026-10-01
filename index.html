@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>플랜두씨 다이어리</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --paper: #f6f1e7;
+      --sheet: #fffdf8;
+      --ink: #2b2620;
+      --ink-soft: #6b6257;
+      --line: #e3dacb;
+      --rule: #d9cfbe;
+      --accent: #2f5d50;
+      --accent-soft: #e3ece8;
+      --high: #b3412e;   --high-bg: #f7e4df;
+      --medium: #9a6b14; --medium-bg: #f5ead3;
+      --low: #4f6a86;    --low-bg: #e4ebf2;
+      --warn-bg: #fff3cf; --warn-line: #e3c56a;
+      --error: #a3321f;
+      --radius: 10px;
+      --serif: "Gowun Batang", serif;
+      --sans: "IBM Plex Sans KR", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--paper); color: var(--ink);
+      font-family: var(--sans); font-size: 15px; line-height: 1.65;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px 80px; }
+    a { color: var(--accent); }
+    button, input, select, textarea { font: inherit; color: inherit; }
+
+    /* 머리 */
+    header { padding: 36px 0 16px; }
+    .brand { font-family: var(--serif); font-size: 30px; font-weight: 700; margin: 0; letter-spacing: -0.5px; }
+    .brand a { color: inherit; text-decoration: none; }
+    .flow { display: flex; gap: 6px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--ink-soft); }
+    .flow b { color: var(--accent); }
+    .flow .later { opacity: .55; }
+    .notice {
+      background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: var(--radius);
+      padding: 10px 14px; font-size: 14px; margin: 12px 0 24px;
+    }
+
+    /* 종이 한 장 */
+    .sheet {
+      background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 22px 22px; margin-bottom: 18px; box-shadow: 0 1px 0 rgba(0,0,0,.03);
+    }
+    h2 { font-family: var(--serif); font-size: 21px; margin: 0 0 14px; }
+    h3 { font-family: var(--serif); font-size: 17px; margin: 0 0 10px; }
+    .muted { color: var(--ink-soft); font-size: 13px; }
+
+    /* 폼 */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
+    .full { grid-column: 1 / -1; }
+    label.f { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    label.f .req { color: var(--high); }
+    .hint { font-weight: 400; color: var(--ink-soft); }
+    input[type=text], input[type=date], input[type=number], textarea {
+      width: 100%; background: #fff; border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px;
+    }
+    textarea { min-height: 70px; resize: vertical; }
+    input:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+    .time { display: flex; gap: 8px; align-items: center; }
+    .time input { width: 90px; }
+    .prio { display: flex; gap: 8px; flex-wrap: wrap; }
+    .prio label {
+      border: 1px solid var(--rule); border-radius: 999px; padding: 4px 14px; cursor: pointer; font-size: 14px; background: #fff;
+    }
+    .prio input { position: absolute; opacity: 0; pointer-events: none; }
+    .prio input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .prio label:has(input:checked) { border-color: currentColor; font-weight: 600; }
+    .prio .high { color: var(--high); } .prio .medium { color: var(--medium); } .prio .low { color: var(--low); }
+    .actions { display: flex; gap: 8px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+    .btn {
+      border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 8px;
+      padding: 8px 16px; cursor: pointer; font-weight: 600;
+    }
+    .btn.ghost { background: transparent; color: var(--accent); }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .err { color: var(--error); font-size: 14px; }
+
+    /* 계획 목록 */
+    .plan-list { list-style: none; padding: 0; margin: 0; }
+    .plan-list li + li { border-top: 1px dashed var(--rule); }
+    .plan-list a {
+      display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 12px 4px;
+      color: inherit; text-decoration: none;
+    }
+    .plan-list a:hover .t { color: var(--accent); text-decoration: underline; }
+    .plan-list .t { font-weight: 600; }
+    .plan-list .m { grid-column: 1; font-size: 13px; color: var(--ink-soft); }
+    .plan-list .b { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 6px; align-items: center; }
+
+    .badge { font-size: 12px; padding: 2px 9px; border-radius: 999px; white-space: nowrap; font-weight: 600; }
+    .badge.high { background: var(--high-bg); color: var(--high); }
+    .badge.medium { background: var(--medium-bg); color: var(--medium); }
+    .badge.low { background: var(--low-bg); color: var(--low); }
+    .badge.ver { background: var(--accent-soft); color: var(--accent); }
+
+    /* 계획 상세 */
+    .detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    .detail-head h2 { margin: 0; }
+    dl.facts { display: grid; grid-template-columns: 7em 1fr; gap: 8px 12px; margin: 16px 0 0; }
+    dl.facts dt { color: var(--ink-soft); font-size: 13px; padding-top: 2px; }
+    dl.facts dd { margin: 0; }
+    .criteria { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; background: var(--accent-soft); border-radius: 0 6px 6px 0; }
+    .pre { white-space: pre-wrap; }
+
+    /* 이력 타임라인 */
+    .timeline { list-style: none; margin: 0; padding: 0 0 0 18px; border-left: 2px solid var(--rule); }
+    .timeline > li { position: relative; padding: 0 0 18px 14px; }
+    .timeline > li::before {
+      content: ""; position: absolute; left: -25px; top: 6px; width: 12px; height: 12px;
+      border-radius: 50%; background: var(--sheet); border: 2px solid var(--accent);
+    }
+    .timeline > li.now::before { background: var(--accent); }
+    .timeline > li.origin::before { border-color: var(--ink); background: var(--ink); }
+    .v-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    .v-head strong { font-family: var(--serif); }
+    .why { margin: 4px 0 6px; font-size: 14px; }
+    .why::before { content: "고친 이유 · "; color: var(--ink-soft); }
+    .diff { list-style: none; margin: 4px 0 0; padding: 0; font-size: 14px; }
+    .diff li { padding: 2px 0; }
+    .diff .k { color: var(--ink-soft); display: inline-block; min-width: 6em; }
+    .diff del { color: var(--ink-soft); text-decoration-color: var(--error); }
+    .diff ins { text-decoration: none; background: var(--accent-soft); padding: 0 4px; border-radius: 4px; }
+    .snapshot { margin-top: 6px; background: #fbf8f1; border: 1px dashed var(--rule); border-radius: 8px; padding: 10px 12px; }
+    .snapshot dl.facts { margin: 0; grid-template-columns: 6.5em 1fr; font-size: 14px; }
+
+    .empty { color: var(--ink-soft); padding: 8px 0; }
+    .status { padding: 30px 0; text-align: center; color: var(--ink-soft); }
+
+    @media (max-width: 560px) {
+      .grid { grid-template-columns: 1fr; }
+      dl.facts { grid-template-columns: 1fr; gap: 2px; }
+      dl.facts dd { margin-bottom: 8px; }
+      .sheet { padding: 18px 16px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="brand"><a href="#/">플랜두씨 다이어리</a></h1>
+    <div class="flow"><b>Plan 계획</b> → <span class="later">Do 실제로 한 일</span> → <span class="later">See 돌아보기</span></div>
+  </header>
+
+  <p class="notice" role="note">
+    <strong>아직 로그인이 없습니다.</strong>
+    이 주소를 아는 사람은 누구나 이 다이어리를 보고 고칠 수 있습니다. 남이 봐도 괜찮은 내용만 적어 주세요.
+  </p>
+
+  <main id="app"><p class="status">불러오는 중…</p></main>
+</div>
+
+<script>
+/* ===================== 공통 도구 ===================== */
+const app = document.getElementById('app');
+
+// 사용자가 쓴 글을 화면에 넣을 때는 반드시 esc()를 거친다 (스크립트 삽입 방지)
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (ch) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+
+async function api(path, options = {}) {
+  const res = await fetch('/api' + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  let data = null;
+  try { data = await res.json(); } catch { /* 본문 없음 */ }
+  if (!res.ok) throw new Error(data?.error || `요청 실패 (${res.status})`);
+  return data;
+}
+
+const PRIORITY = { high: '높음', medium: '보통', low: '낮음' };
+const FIELD_LABEL = {
+  title: '계획 이름', start_date: '시작일', end_date: '종료일', priority: '우선순위',
+  success_criteria: '성공 기준', estimated_minutes: '예상 시간', goal: '메모',
+};
+
+function fmtMinutes(m) {
+  if (m == null) return '—';
+  const h = Math.floor(m / 60), r = m % 60;
+  return [h ? `${h}시간` : '', r ? `${r}분` : ''].filter(Boolean).join(' ') || '0분';
+}
+function fmtDate(d) {
+  if (!d) return '—';
+  const [y, m, day] = d.split('-').map(Number);
+  const w = '일월화수목금토'[new Date(y, m - 1, day).getDay()];
+  return `${m}월 ${day}일 (${w})`;
+}
+function days(a, b) {
+  return Math.round((new Date(b) - new Date(a)) / 86400000) + 1;
+}
+function fmtStamp(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  return d.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function fmtField(k, v) {
+  if (k === 'priority') return PRIORITY[v] ?? v;
+  if (k === 'estimated_minutes') return fmtMinutes(v);
+  if (k === 'start_date' || k === 'end_date') return fmtDate(v);
+  return v ?? '(비어 있음)';
+}
+const isoToday = (offset = 0) => {
+  const d = new Date(); d.setDate(d.getDate() + offset);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+};
+
+/* ===================== 계획 폼 (만들기·고치기 공용) ===================== */
+function planForm(p = {}, { edit = false } = {}) {
+  const est = p.estimated_minutes ?? '';
+  const h = est === '' ? '' : Math.floor(est / 60);
+  const m = est === '' ? '' : est % 60;
+  const prio = p.priority || 'medium';
+  return `
+  <form id="plan-form" novalidate>
+    <div class="grid">
+      <div class="full">
+        <label class="f" for="f-title">계획 이름 <span class="req">*</span></label>
+        <input id="f-title" name="title" type="text" maxlength="100" required value="${esc(p.title)}"
+               placeholder="예) ALEPH 과제 6 — 플랜두씨 다이어리 완성">
+      </div>
+      <div>
+        <label class="f" for="f-start">시작일 <span class="req">*</span></label>
+        <input id="f-start" name="start_date" type="date" required value="${esc(p.start_date || isoToday())}">
+      </div>
+      <div>
+        <label class="f" for="f-end">종료일 <span class="req">*</span></label>
+        <input id="f-end" name="end_date" type="date" required value="${esc(p.end_date || isoToday(6))}">
+      </div>
+      <div class="full">
+        <span class="f" style="display:block;font-size:13px;font-weight:600;margin-bottom:4px">우선순위 <span class="req">*</span></span>
+        <div class="prio" role="radiogroup" aria-label="우선순위">
+          ${['high', 'medium', 'low'].map((k) => `
+            <label class="${k}"><input type="radio" name="priority" value="${k}" ${prio === k ? 'checked' : ''}><span>${PRIORITY[k]}</span></label>`).join('')}
+        </div>
+      </div>
+      <div class="full">
+        <label class="f" for="f-criteria">성공 기준 <span class="req">*</span>
+          <span class="hint">— 끝났을 때 무엇이 보이면 성공인가요?</span></label>
+        <textarea id="f-criteria" name="success_criteria" maxlength="500" required
+          placeholder="예) 배포 주소에서 카드 1~3 통과 기준을 모두 확인할 수 있다">${esc(p.success_criteria)}</textarea>
+      </div>
+      <div class="full">
+        <label class="f" for="f-h">예상 시간 <span class="req">*</span>
+          <span class="hint">— 이 계획 전체에 쓸 시간</span></label>
+        <div class="time">
+          <input id="f-h" name="hours" type="number" min="0" max="1666" step="1" value="${esc(h)}" aria-label="시간"> 시간
+          <input id="f-m" name="minutes" type="number" min="0" max="59" step="5" value="${esc(m)}" aria-label="분"> 분
+        </div>
+      </div>
+      <div class="full">
+        <label class="f" for="f-goal">메모 <span class="hint">(선택)</span></label>
+        <textarea id="f-goal" name="goal" maxlength="500" placeholder="왜 이 계획을 세웠는지, 참고할 것">${esc(p.goal)}</textarea>
+      </div>
+      ${edit ? `
+      <div class="full">
+        <label class="f" for="f-note">고친 이유 <span class="req">*</span>
+          <span class="hint">— 이력에 함께 남습니다</span></label>
+        <input id="f-note" name="change_note" type="text" maxlength="200" required
+               placeholder="예) API 작업이 예상보다 오래 걸려서 시간을 늘림">
+      </div>` : ''}
+    </div>
+    <div class="actions">
+      <button class="btn" type="submit">${edit ? '고친 내용 저장' : '계획 저장'}</button>
+      ${edit ? '<button class="btn ghost" type="button" id="cancel-edit">취소</button>' : ''}
+      <span class="err" id="form-err" role="alert"></span>
+    </div>
+  </form>`;
+}
+
+// 폼 값 → API에 보낼 JSON. 화면에서 1차로 거르고, 최종 검사는 서버가 한다.
+function readPlanForm(form) {
+  const f = new FormData(form);
+  const text = (k) => (f.get(k) || '').trim();
+  const hours = Number(f.get('hours') || 0), minutes = Number(f.get('minutes') || 0);
+  const data = {
+    title: text('title'),
+    start_date: f.get('start_date'),
+    end_date: f.get('end_date'),
+    priority: f.get('priority'),
+    success_criteria: text('success_criteria'),
+    estimated_minutes: Math.round(hours * 60 + minutes),
+    goal: text('goal') || null,
+  };
+  if (!data.title) throw new Error('계획 이름을 적어 주세요');
+  if (!data.start_date || !data.end_date) throw new Error('기간을 정해 주세요');
+  if (data.end_date < data.start_date) throw new Error('종료일이 시작일보다 빠릅니다');
+  if (!data.success_criteria) throw new Error('성공 기준을 적어 주세요');
+  if (!(data.estimated_minutes >= 1)) throw new Error('예상 시간을 1분 이상 적어 주세요');
+  if (f.has('change_note')) data.change_note = text('change_note');
+  return data;
+}
+
+/* ===================== 화면 1: 계획 목록 + 새 계획 ===================== */
+async function showHome() {
+  app.innerHTML = '<p class="status">불러오는 중…</p>';
+  const plans = await api('/plans');
+  app.innerHTML = `
+    <section class="sheet">
+      <h2>내 계획</h2>
+      ${plans.length ? `<ul class="plan-list">${plans.map((p) => `
+        <li><a href="#/plan/${p.id}">
+          <span class="t">${esc(p.title)}</span>
+          <span class="m">${fmtDate(p.start_date)} ~ ${fmtDate(p.end_date)} · 예상 ${fmtMinutes(p.estimated_minutes)}</span>
+          <span class="b">
+            ${p.version > 1 ? `<span class="badge ver">${p.version - 1}번 고침</span>` : ''}
+            <span class="badge ${esc(p.priority)}">${PRIORITY[p.priority] ?? ''}</span>
+          </span>
+        </a></li>`).join('')}</ul>`
+      : '<p class="empty">아직 계획이 없습니다. 아래에서 지금 실제로 하고 있는 일 하나를 계획으로 옮겨 보세요.</p>'}
+    </section>
+    <section class="sheet">
+      <h2>새 계획 세우기</h2>
+      ${planForm()}
+    </section>`;
+
+  const form = document.getElementById('plan-form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submit(form, async () => {
+      const created = await api('/plans', { method: 'POST', body: readPlanForm(form) });
+      location.hash = `#/plan/${created.id}`;
+    });
+  });
+}
+
+/* ===================== 화면 2: 계획 상세 + 고치기 + 이력 ===================== */
+async function showPlan(id) {
+  app.innerHTML = '<p class="status">불러오는 중…</p>';
+  const [{ plan }, { versions }] = await Promise.all([api(`/plans/${id}`), api(`/plans/${id}/revisions`)]);
+
+  app.innerHTML = `
+    <p><a href="#/">← 계획 목록</a></p>
+    <section class="sheet" id="plan-view">
+      <div class="detail-head">
+        <h2>${esc(plan.title)}</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="badge ver">v${plan.version}</span>
+          <span class="badge ${esc(plan.priority)}">우선순위 ${PRIORITY[plan.priority] ?? ''}</span>
+        </div>
+      </div>
+      <dl class="facts">
+        <dt>계획 ID</dt><dd>#${plan.id} <span class="muted">— 고쳐도 바뀌지 않습니다</span></dd>
+        <dt>기간</dt><dd>${fmtDate(plan.start_date)} ~ ${fmtDate(plan.end_date)} <span class="muted">(${days(plan.start_date, plan.end_date)}일)</span></dd>
+        <dt>예상 시간</dt><dd>${fmtMinutes(plan.estimated_minutes)}</dd>
+        <dt>성공 기준</dt><dd class="criteria pre">${esc(plan.success_criteria) || '<span class="muted">(없음)</span>'}</dd>
+        ${plan.goal ? `<dt>메모</dt><dd class="pre">${esc(plan.goal)}</dd>` : ''}
+      </dl>
+      <div class="actions"><button class="btn ghost" id="start-edit">계획 고치기</button></div>
+    </section>
+
+    <section class="sheet" id="plan-edit" hidden>
+      <h2>계획 고치기</h2>
+      <p class="muted">저장하면 지금 내용은 아래 이력에 그대로 남고, 계획은 v${plan.version + 1}이 됩니다.</p>
+      ${planForm(plan, { edit: true })}
+    </section>
+
+    <section class="sheet">
+      <h2>변경 이력</h2>
+      <p class="muted" style="margin-top:-8px">처음 세운 계획부터 지금까지. 예전 내용은 고칠 수 없습니다.</p>
+      ${timeline(versions)}
+    </section>`;
+
+  const view = document.getElementById('plan-view'), edit = document.getElementById('plan-edit');
+  document.getElementById('start-edit').onclick = () => {
+    view.hidden = true; edit.hidden = false; document.getElementById('f-title').focus();
+  };
+  document.getElementById('cancel-edit').onclick = () => { edit.hidden = true; view.hidden = false; };
+
+  const form = document.getElementById('plan-form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submit(form, async () => {
+      const data = readPlanForm(form);
+      // 바뀐 칸만 보낸다
+      const changes = Object.fromEntries(Object.entries(data)
+        .filter(([k, v]) => k !== 'change_note' && (plan[k] ?? null) !== v));
+      if (!Object.keys(changes).length) throw new Error('바뀐 내용이 없습니다');
+      if (!data.change_note) throw new Error('고친 이유를 적어 주세요');
+      await api(`/plans/${id}`, { method: 'PATCH', body: { ...changes, change_note: data.change_note } });
+      await showPlan(id);
+    });
+  });
+}
+
+function timeline(versions) {
+  const items = versions.map((v, i) => {
+    const prev = versions[i - 1];
+    const isOrigin = i === 0, isNow = i === versions.length - 1;
+    const label = isOrigin ? '처음 세운 계획' : `${i}번째 수정`;
+    let body = '';
+    if (isOrigin) {
+      body = `<div class="snapshot"><dl class="facts">${
+        ['title', 'start_date', 'end_date', 'priority', 'success_criteria', 'estimated_minutes', 'goal']
+          .filter((k) => k !== 'goal' || v.goal)
+          .map((k) => `<dt>${FIELD_LABEL[k]}</dt><dd class="pre">${esc(fmtField(k, v[k]))}</dd>`).join('')
+      }</dl></div>`;
+    } else {
+      const changed = Object.keys(FIELD_LABEL).filter((k) => (prev[k] ?? null) !== (v[k] ?? null));
+      body = `
+        ${v.change_note ? `<p class="why">${esc(v.change_note)}</p>` : ''}
+        <ul class="diff">${changed.map((k) => `
+          <li><span class="k">${FIELD_LABEL[k]}</span>
+            <del>${esc(fmtField(k, prev[k]))}</del> → <ins>${esc(fmtField(k, v[k]))}</ins></li>`).join('')}
+        </ul>`;
+    }
+    return `<li class="${isOrigin ? 'origin' : ''} ${isNow ? 'now' : ''}">
+      <div class="v-head"><strong>v${v.version} · ${label}</strong>
+        ${isNow ? '<span class="badge ver">지금</span>' : ''}
+        <span class="muted">${fmtStamp(v.valid_from)}</span></div>
+      ${body}
+    </li>`;
+  });
+  return `<ol class="timeline">${items.reverse().join('')}</ol>`;
+}
+
+/* ===================== 제출 공통 처리 ===================== */
+async function submit(form, work) {
+  const btn = form.querySelector('button[type=submit]');
+  const err = form.querySelector('#form-err');
+  err.textContent = '';
+  btn.disabled = true;
+  try { await work(); }
+  catch (e) { err.textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+
+/* ===================== 주소(#) 따라 화면 고르기 ===================== */
+async function route() {
+  const m = location.hash.match(/^#\/plan\/(\d+)$/);
+  try {
+    if (m) await showPlan(Number(m[1]));
+    else await showHome();
+  } catch (e) {
+    app.innerHTML = `<section class="sheet"><h2>불러오지 못했습니다</h2>
+      <p class="err">${esc(e.message)}</p>
+      <p class="muted">서버나 데이터베이스에 연결하지 못했을 수 있습니다. 잠시 뒤 새로고침해 보세요.</p>
+      <p><a href="#/">← 계획 목록</a></p></section>`;
+  }
+  window.scrollTo(0, 0);
+}
+window.addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>

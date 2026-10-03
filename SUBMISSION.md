@@ -26,5 +26,5 @@
 - 집계 숫자를 눌러 근거 기록으로 이동: 계획 화면 '돌아보기', 첫 화면 '기간별 돌아보기'
 - 첫 화면 공개 안내: 화면 맨 위 노란 상자
 - 스크립트 삽입: 모든 입력칸에 `<script>…`, `<img onerror=…>`를 넣어도 글자 그대로 보이고 실행되지 않음
-- 비밀값: `python scripts/check_secrets.py --url https://plandoseediary.vercel.app` → [결과 붙여넣기]
-- 외부 공개: 결과물·소스 주소를 새 시크릿 창에서 로그인 없이 열어 확인 [확인 날짜]
+- 비밀값: `python scripts/check_secrets.py --url https://plandoseediary.vercel.app` → ✓ 비밀키 원문을 찾지 못했습니다.
+- 외부 공개: 결과물·소스 주소를 새 시크릿 창에서 로그인 없이 열어 확인 2026.10.03

@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+.vercel/
+__pycache__/
+.pytest_cache/

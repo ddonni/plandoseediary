@@ -1,0 +1,764 @@
+{
+  "$id": "contracts/pds-schema-v2.json",
+  "name": "plan-do-see",
+  "version": 2,
+  "database": "PostgreSQL (Supabase)",
+  "generated_from": "schema.sql + migrations/002~006 를 빈 Postgres 16에 차례로 실행한 뒤 information_schema에서 읽은 실제 구조",
+  "migrations": [
+    "schema.sql",
+    "migrations/002_card1_plan_history.sql",
+    "migrations/003_card2_tasks.sql",
+    "migrations/004_card3_logs_completions.sql",
+    "migrations/005_task_trash.sql",
+    "migrations/006_drop_old_view.sql"
+  ],
+  "rules": {
+    "ids": "모든 id는 bigint, DB가 매기는 identity(generated always). 고쳐도 바뀌지 않는다. request_keys만 UUID 키.",
+    "timestamps": "timestamptz. DB 안에서는 절대 시각(UTC 기준)으로 저장, API는 ISO 8601에 시간대를 붙여 돌려주고, 화면은 Asia/Seoul로 바꿔 보여 준다. 화면 입력(datetime-local)은 브라우저가 UTC(Z)로 바꿔 보낸다.",
+    "dates": "date(start_date, end_date, due_date, done_date)는 시간대 없는 서울(Asia/Seoul) 달력 날짜 YYYY-MM-DD. done_date는 서버가 ended_at을 서울 날짜로 바꿔 채운다.",
+    "today": "'오늘'·지연 판정은 서버에서 Asia/Seoul 날짜 기준 (Vercel 서버는 UTC로 돌기 때문).",
+    "durations": "시간 길이는 모두 정수 분(minute): plans.estimated_minutes, tasks.planned_minutes, logs.actual_minutes. 화면에서만 'n시간 m분'으로 보여 준다. 차이 = 실제 − 예상 (같은 단위).",
+    "deletion": "할 일 지우기 = tasks.deleted_at 표시(휴지통). 30일 뒤 또는 '영구 삭제' 때 실제 DELETE, 딸린 logs·task_completions는 ON DELETE CASCADE. 계획을 지우면 딸린 모든 것이 연쇄 삭제.",
+    "security": "모든 표 RLS 켬 + 정책 0개 → 공개(anon) 키로는 읽기·쓰기 불가. 서버(Vercel 함수)만 비밀키(service_role / sb_secret_)로 접근."
+  },
+  "relations": [
+    {
+      "from": "tasks.plan_id",
+      "to": "plans.id",
+      "on_delete": "cascade",
+      "cardinality": "계획 1 : 할 일 N"
+    },
+    {
+      "from": "logs.plan_id",
+      "to": "plans.id",
+      "on_delete": "cascade",
+      "cardinality": "계획 1 : 실행 기록 N"
+    },
+    {
+      "from": "logs.(task_id, plan_id)",
+      "to": "tasks.(id, plan_id)",
+      "on_delete": "cascade",
+      "cardinality": "할 일 1 : 실행 기록 N",
+      "note": "복합 외래키 — 기록은 같은 계획의 할 일에만 붙는다. task_id가 비면 검사 생략(계획에 없던 일)"
+    },
+    {
+      "from": "task_completions.task_id",
+      "to": "tasks.id",
+      "on_delete": "cascade",
+      "cardinality": "할 일 1 : 살아 있는 완료 기록 0..1 (취소된 기록은 여러 개)"
+    },
+    {
+      "from": "task_completions.plan_id",
+      "to": "plans.id",
+      "on_delete": "cascade"
+    },
+    {
+      "from": "reviews.plan_id",
+      "to": "plans.id",
+      "on_delete": "cascade",
+      "cardinality": "계획 1 : 돌아보기 0..1"
+    },
+    {
+      "from": "plans.from_review_id",
+      "to": "reviews.id",
+      "on_delete": "set null",
+      "cardinality": "돌아보기 1 : 이어받은 계획 N"
+    },
+    {
+      "from": "plan_revisions.plan_id",
+      "to": "plans.id",
+      "on_delete": "cascade",
+      "cardinality": "계획 1 : 예전 버전 N"
+    }
+  ],
+  "triggers": [
+    {
+      "name": "plans_keep_history",
+      "table": "plans",
+      "when": "BEFORE UPDATE",
+      "does": "계획 내용(title, start_date, end_date, goal, priority, success_criteria, estimated_minutes)이 바뀌면 직전 값을 plan_revisions에 넣고 version+1"
+    },
+    {
+      "name": "plan_revisions_readonly",
+      "table": "plan_revisions",
+      "when": "BEFORE UPDATE",
+      "does": "이력 수정 차단"
+    },
+    {
+      "name": "tasks_touch",
+      "table": "tasks",
+      "when": "BEFORE INSERT OR UPDATE",
+      "does": "updated_at 갱신, status와 done_at 짝 맞추기 (완료 유지 중엔 처음 완료 시각 보존, 되돌리면 비움)"
+    },
+    {
+      "name": "tasks_completion_events",
+      "table": "tasks",
+      "when": "AFTER INSERT OR UPDATE OF status",
+      "does": "진행 중→완료일 때만 task_completions 1줄, 완료→진행 중이면 그 줄에 revoked_at"
+    }
+  ],
+  "tables": {
+    "logs": {
+      "description": "실행 기록(Do). 계획·할 일의 예상 값을 덮어쓰지 않는 별도 표.",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "기록 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "어느 계획의 기록인지"
+        },
+        "task_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "어느 할 일의 기록인지. 비어 있으면 '계획에 없던 일'"
+        },
+        "done_date": {
+          "type": "date",
+          "nullable": false,
+          "description": "끝난 날 — ended_at의 서울 달력 날짜"
+        },
+        "actual_minutes": {
+          "type": "integer",
+          "nullable": false,
+          "description": "실제로 걸린 시간 — 분 (시작~끝 이하)"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "description": "partial(일부) | done(이 기록으로 완료) | skipped(예전 값, 지금 화면에서는 만들지 않음)"
+        },
+        "note": {
+          "type": "text",
+          "nullable": true,
+          "description": "메모 (500자 이하)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "기록을 저장한 시각"
+        },
+        "started_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "시작 시각"
+        },
+        "ended_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "끝난 시각 (시작 이상, 24시간 이내)"
+        },
+        "blocker": {
+          "type": "text",
+          "nullable": true,
+          "description": "막혔던 이유 (500자 이하)"
+        }
+      },
+      "constraints": [
+        {
+          "name": "logs_actual_minutes_check",
+          "kind": "check",
+          "definition": "CHECK (((actual_minutes >= 0) AND (actual_minutes <= 1440)))"
+        },
+        {
+          "name": "logs_actual_within_span",
+          "kind": "check",
+          "definition": "CHECK (((actual_minutes)::numeric <= ceil((EXTRACT(epoch FROM (ended_at - started_at)) / (60)::numeric))))"
+        },
+        {
+          "name": "logs_blocker_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(blocker) <= 500))"
+        },
+        {
+          "name": "logs_note_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(note) <= 500))"
+        },
+        {
+          "name": "logs_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "logs_plan_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "logs_span_24h",
+          "kind": "check",
+          "definition": "CHECK (((ended_at - started_at) <= '24:00:00'::interval))"
+        },
+        {
+          "name": "logs_status_check",
+          "kind": "check",
+          "definition": "CHECK ((status = ANY (ARRAY['done'::text, 'partial'::text, 'skipped'::text])))"
+        },
+        {
+          "name": "logs_task_id_plan_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (task_id, plan_id) REFERENCES tasks(id, plan_id) ON DELETE CASCADE"
+        },
+        {
+          "name": "logs_time_order",
+          "kind": "check",
+          "definition": "CHECK ((ended_at >= started_at))"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "logs_plan_id_idx",
+          "definition": "CREATE INDEX logs_plan_id_idx ON public.logs USING btree (plan_id)"
+        },
+        {
+          "name": "logs_task_id_idx",
+          "definition": "CREATE INDEX logs_task_id_idx ON public.logs USING btree (task_id)"
+        }
+      ]
+    },
+    "plan_revisions": {
+      "description": "계획의 예전 버전들. 고칠 수 없음(UPDATE 차단).",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "이력 줄 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "어느 계획의 이력인지"
+        },
+        "version": {
+          "type": "integer",
+          "nullable": false,
+          "description": "그 줄이 담은 버전 (1 = 처음 계획)"
+        },
+        "title": {
+          "type": "text",
+          "nullable": false,
+          "description": "그때 계획 이름"
+        },
+        "start_date": {
+          "type": "date",
+          "nullable": false,
+          "description": "그때 시작일"
+        },
+        "end_date": {
+          "type": "date",
+          "nullable": false,
+          "description": "그때 종료일"
+        },
+        "goal": {
+          "type": "text",
+          "nullable": true,
+          "description": "그때 메모"
+        },
+        "priority": {
+          "type": "text",
+          "nullable": false,
+          "description": "그때 우선순위"
+        },
+        "success_criteria": {
+          "type": "text",
+          "nullable": true,
+          "description": "그때 성공 기준"
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "nullable": true,
+          "description": "그때 예상 시간 — 분"
+        },
+        "change_note": {
+          "type": "text",
+          "nullable": true,
+          "description": "그 버전이 만들어진 이유"
+        },
+        "valid_from": {
+          "type": "timestamptz",
+          "nullable": false,
+          "description": "그 버전이 생긴 시각"
+        },
+        "replaced_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "다음 버전으로 바뀐 시각"
+        }
+      },
+      "constraints": [
+        {
+          "name": "plan_revisions_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "plan_revisions_plan_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "plan_revisions_plan_id_version_key",
+          "kind": "unique",
+          "definition": "UNIQUE (plan_id, version)"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "plan_revisions_plan_id_idx",
+          "definition": "CREATE INDEX plan_revisions_plan_id_idx ON public.plan_revisions USING btree (plan_id)"
+        }
+      ]
+    },
+    "plans": {
+      "description": "계획(Plan). 기간 하나 = 계획 하나. 고치면 고치기 직전 값이 plan_revisions에 쌓이고 id는 그대로.",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "계획 ID. 고쳐도 바뀌지 않음"
+        },
+        "title": {
+          "type": "text",
+          "nullable": false,
+          "description": "계획 이름 (1~100자)"
+        },
+        "start_date": {
+          "type": "date",
+          "nullable": false,
+          "description": "시작일 — 서울 달력 날짜"
+        },
+        "end_date": {
+          "type": "date",
+          "nullable": false,
+          "description": "종료일 — 서울 달력 날짜, 시작일 이상"
+        },
+        "goal": {
+          "type": "text",
+          "nullable": true,
+          "description": "메모 (500자 이하)"
+        },
+        "from_review_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "이 계획이 이어받은 지난 돌아보기(고칠 점). See → 다음 Plan 연결"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "만든 시각"
+        },
+        "priority": {
+          "type": "text",
+          "nullable": false,
+          "default": "'medium'",
+          "description": "우선순위 high | medium | low"
+        },
+        "success_criteria": {
+          "type": "text",
+          "nullable": true,
+          "description": "성공 기준 (500자 이하, API에서는 필수)"
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "nullable": true,
+          "description": "계획 전체 예상 시간 — 분"
+        },
+        "version": {
+          "type": "integer",
+          "nullable": false,
+          "default": "1",
+          "description": "버전. 1 = 처음 세운 계획, 내용이 바뀔 때마다 트리거가 +1"
+        },
+        "change_note": {
+          "type": "text",
+          "nullable": true,
+          "description": "이 버전으로 고친 이유 (200자 이하)"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "지금 버전이 생긴 시각"
+        }
+      },
+      "constraints": [
+        {
+          "name": "plans_change_note_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(change_note) <= 200))"
+        },
+        {
+          "name": "plans_check",
+          "kind": "check",
+          "definition": "CHECK ((end_date >= start_date))"
+        },
+        {
+          "name": "plans_estimated_minutes_check",
+          "kind": "check",
+          "definition": "CHECK (((estimated_minutes >= 1) AND (estimated_minutes <= 100000)))"
+        },
+        {
+          "name": "plans_from_review_fk",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (from_review_id) REFERENCES reviews(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "plans_goal_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(goal) <= 500))"
+        },
+        {
+          "name": "plans_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "plans_priority_check",
+          "kind": "check",
+          "definition": "CHECK ((priority = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])))"
+        },
+        {
+          "name": "plans_success_criteria_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(success_criteria) <= 500))"
+        },
+        {
+          "name": "plans_title_check",
+          "kind": "check",
+          "definition": "CHECK (((char_length(title) >= 1) AND (char_length(title) <= 100)))"
+        }
+      ],
+      "indexes": []
+    },
+    "request_keys": {
+      "description": "같은 요청 알아보기(Idempotency-Key) 장부. 내부용이라 내보내기에는 넣지 않음.",
+      "columns": {
+        "key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "화면이 보낸 요청 키(UUID)"
+        },
+        "method": {
+          "type": "text",
+          "nullable": false,
+          "description": "HTTP 메서드"
+        },
+        "path": {
+          "type": "text",
+          "nullable": false,
+          "description": "요청 주소"
+        },
+        "status": {
+          "type": "integer",
+          "nullable": true,
+          "description": "처음 처리 결과의 HTTP 상태 (처리 중이면 비어 있음)"
+        },
+        "response": {
+          "type": "jsonb",
+          "nullable": true,
+          "description": "처음 처리 결과 본문"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "처음 받은 시각"
+        }
+      },
+      "constraints": [
+        {
+          "name": "request_keys_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (key)"
+        }
+      ],
+      "indexes": []
+    },
+    "reviews": {
+      "description": "돌아보기(See). 계획당 하나, 다시 쓰면 덮어씀.",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "돌아보기 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "어느 계획의 돌아보기인지 (계획당 1개)"
+        },
+        "went_well": {
+          "type": "text",
+          "nullable": true,
+          "description": "잘된 점"
+        },
+        "went_wrong": {
+          "type": "text",
+          "nullable": true,
+          "description": "아쉬운 점"
+        },
+        "miss_pattern": {
+          "type": "text",
+          "nullable": false,
+          "description": "주로 빗나간 쪽 underestimate | overestimate | unplanned | skipped | on_track"
+        },
+        "lesson": {
+          "type": "text",
+          "nullable": false,
+          "description": "다음 계획으로 넘길 고칠 점 한 줄 (API: 200자 이하, 줄바꿈 없음)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "처음 쓴 시각"
+        }
+      },
+      "constraints": [
+        {
+          "name": "reviews_lesson_check",
+          "kind": "check",
+          "definition": "CHECK (((char_length(lesson) >= 1) AND (char_length(lesson) <= 500)))"
+        },
+        {
+          "name": "reviews_miss_pattern_check",
+          "kind": "check",
+          "definition": "CHECK ((miss_pattern = ANY (ARRAY['underestimate'::text, 'overestimate'::text, 'unplanned'::text, 'skipped'::text, 'on_track'::text])))"
+        },
+        {
+          "name": "reviews_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "reviews_plan_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "reviews_plan_id_key",
+          "kind": "unique",
+          "definition": "UNIQUE (plan_id)"
+        },
+        {
+          "name": "reviews_went_well_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(went_well) <= 1000))"
+        },
+        {
+          "name": "reviews_went_wrong_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(went_wrong) <= 1000))"
+        }
+      ],
+      "indexes": []
+    },
+    "task_completions": {
+      "description": "완료 기록. 할 일이 진행 중→완료로 '바뀔 때만' 트리거가 1줄 만든다. 할 일당 살아 있는 줄은 1개(유일 인덱스).",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "완료 기록 ID"
+        },
+        "task_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "완료한 할 일"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "그 할 일의 계획"
+        },
+        "completed_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "완료한 시각"
+        },
+        "revoked_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "진행 중으로 되돌린 시각. 차 있으면 집계에서 뺌"
+        }
+      },
+      "constraints": [
+        {
+          "name": "task_completions_check",
+          "kind": "check",
+          "definition": "CHECK (((revoked_at IS NULL) OR (revoked_at >= completed_at)))"
+        },
+        {
+          "name": "task_completions_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "task_completions_plan_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "task_completions_task_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "task_completions_one_active",
+          "definition": "CREATE UNIQUE INDEX task_completions_one_active ON public.task_completions USING btree (task_id) WHERE (revoked_at IS NULL)"
+        },
+        {
+          "name": "task_completions_plan_id_idx",
+          "definition": "CREATE INDEX task_completions_plan_id_idx ON public.task_completions USING btree (plan_id)"
+        }
+      ]
+    },
+    "tasks": {
+      "description": "할 일. 계획에 딸림. deleted_at이 차 있으면 휴지통(30일 뒤 영구 삭제).",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "할 일 ID"
+        },
+        "plan_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "어느 계획의 할 일인지"
+        },
+        "title": {
+          "type": "text",
+          "nullable": false,
+          "description": "할 일 (1~100자)"
+        },
+        "due_date": {
+          "type": "date",
+          "nullable": true,
+          "description": "마감일 — 서울 달력 날짜 (없을 수 있음)"
+        },
+        "planned_minutes": {
+          "type": "integer",
+          "nullable": false,
+          "description": "예상 시간 — 분 (1~1440)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "만든 시각"
+        },
+        "priority": {
+          "type": "text",
+          "nullable": false,
+          "default": "'medium'",
+          "description": "우선순위 high | medium | low"
+        },
+        "tags": {
+          "type": "text[]",
+          "nullable": false,
+          "default": "'{}'[]",
+          "description": "태그 목록 (10개 이하, 하나당 20자 이하)"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'open'",
+          "description": "open(진행 중) | done(완료)"
+        },
+        "done_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "완료로 바꾼 시각. status=done일 때만 차 있음(제약)"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "마지막으로 고친 시각"
+        },
+        "deleted_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "휴지통으로 옮긴 시각. 비어 있으면 살아 있는 할 일"
+        }
+      },
+      "constraints": [
+        {
+          "name": "tasks_done_at_matches",
+          "kind": "check",
+          "definition": "CHECK (((status = 'done'::text) = (done_at IS NOT NULL)))"
+        },
+        {
+          "name": "tasks_id_plan_id_key",
+          "kind": "unique",
+          "definition": "UNIQUE (id, plan_id)"
+        },
+        {
+          "name": "tasks_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "tasks_plan_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "tasks_planned_minutes_check",
+          "kind": "check",
+          "definition": "CHECK (((planned_minutes >= 1) AND (planned_minutes <= 1440)))"
+        },
+        {
+          "name": "tasks_priority_check",
+          "kind": "check",
+          "definition": "CHECK ((priority = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])))"
+        },
+        {
+          "name": "tasks_status_check",
+          "kind": "check",
+          "definition": "CHECK ((status = ANY (ARRAY['open'::text, 'done'::text])))"
+        },
+        {
+          "name": "tasks_tags_check",
+          "kind": "check",
+          "definition": "CHECK (((cardinality(tags) <= 10) AND (char_length(array_to_string(tags, ','::text)) <= 209)))"
+        },
+        {
+          "name": "tasks_title_check",
+          "kind": "check",
+          "definition": "CHECK (((char_length(title) >= 1) AND (char_length(title) <= 100)))"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "tasks_alive_by_plan",
+          "definition": "CREATE INDEX tasks_alive_by_plan ON public.tasks USING btree (plan_id) WHERE (deleted_at IS NULL)"
+        },
+        {
+          "name": "tasks_plan_id_idx",
+          "definition": "CREATE INDEX tasks_plan_id_idx ON public.tasks USING btree (plan_id)"
+        },
+        {
+          "name": "tasks_tags_idx",
+          "definition": "CREATE INDEX tasks_tags_idx ON public.tasks USING gin (tags)"
+        }
+      ]
+    }
+  }
+}

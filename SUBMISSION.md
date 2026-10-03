@@ -5,7 +5,7 @@
 ## 제출물
 
 - 결과물 주소: https://plandoseediary.vercel.app
-- 소스 주소: [GitHub 저장소 주소]
+- 소스 주소: https://github.com/ddonni/plandoseediary
 
 ## 짧은 확인 방법
 

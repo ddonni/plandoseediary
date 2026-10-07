@@ -11,6 +11,7 @@
 
 - 비밀키는 Vercel 환경변수에만 있고, 브라우저로 내려가지 않습니다.
 - Supabase 테이블은 RLS가 켜져 있고 정책이 없어서, 공개 키로는 아무것도 읽고 쓸 수 없습니다.
+- **로그인(과제 7)**: 가입·로그인하면 HttpOnly 세션 쿠키. `/api/auth/*`·`/api/health`를 뺀 모든 API는 로그인 필요, 모든 자료는 로그인한 사람의 것만 보입니다. 자세한 내용은 `AUTH.md`.
 
 ## 폴더
 
@@ -22,9 +23,16 @@
 | `migrations/004_card3_logs_completions.sql` | 카드 3: 실행 기록 시각·막힌 이유, 완료 기록 표(할 일당 1건), 요청 키 표 |
 | `migrations/005_task_trash.sql` | 할 일 휴지통: `deleted_at` (30일 동안 되돌리기) |
 | `migrations/006_drop_old_view.sql` | 쓰지 않는 옛 집계 뷰 `task_progress` 지우기 |
-| `contracts/pds-schema-v2.json` | 최종 DB의 표·칸·제약·관계·트리거와 날짜·시간·단위 규칙 (실제 DB 구조에서 뽑음) |
+| `migrations/007_auth.sql` | 과제 7: 계정·세션·로그인 시도 표, 모든 자료 표에 `user_id`, 주인 상속 트리거, 계획 규칙·5일 질문 칸 |
+| `migrations/008_claim_legacy_data.sql` | 과제 7: 기존 자료를 내 계정으로 옮기기 (이메일 바꿔서 실행) |
+| `contracts/pds-schema-v3.json` | 최종 DB의 표·칸·제약·관계·트리거와 날짜·시간·단위·인증 규칙 (실제 DB 구조에서 뽑음) |
 | `scripts/check_secrets.py` | 비밀키 점검: 소스·Git 기록 전체·(`--url`) 배포된 사이트 |
-| `SUBMISSION.md` | 제출문 초안 (확인 방법 4줄, AI와 내 판단 3줄) |
+| `SUBMISSION.md` | 과제 6 제출문 |
+| `AUTH.md` | 과제 7 인증 구현 설명서 (①~⑥ + 5일 사용 기록) |
+| `SUBMISSION-7.md` | 과제 7 제출문 (확인 방법 4줄, AI와 내 판단 3줄) |
+| `scripts/verify_auth.py` | 인증 확인: 시험 계정 2개로 확인 다섯 가지(로그인 없이·남의 자료 양방향·남의 계정 적어 보내기·로그아웃 뒤·비밀번호 변경 뒤)와 계정 삭제까지 72가지를 요청·응답으로 기록 (비밀값 가림) |
+| `docs/auth-check*.md` | `verify_auth.py` 실행 결과 |
+| `docs/hash-check.sql` | 저장된 비밀번호 값 확인 SQL (같은 비밀번호 → 다른 저장값) |
 | `api/index.py` | 서버 API (Flask) |
 | `tests/test_api.py` | 가짜 DB로 돌리는 API 테스트 |
 | `index.html` | 화면 |
@@ -35,7 +43,15 @@
 
 | 메서드 | 주소 | 하는 일 |
 |---|---|---|
-| GET | `/api/health` | DB까지 실제로 다녀와서 연결 확인 |
+| GET | `/api/health` | DB까지 실제로 다녀와서 연결 확인 (로그인 불필요) |
+| POST | `/api/auth/signup` | 가입 (이메일, 비밀번호 10자 이상) → 세션 쿠키 |
+| POST | `/api/auth/login` | 로그인 → 세션 쿠키 (15분 5회 실패 시 429) |
+| POST | `/api/auth/logout` | 세션 삭제 + 쿠키 비움 |
+| GET | `/api/auth/me` | 지금 로그인한 이메일 (없으면 401) |
+| POST | `/api/auth/password` | 비밀번호 바꾸기 (지금 비밀번호 확인) → 이 계정의 세션 전부 삭제, 이 브라우저만 새 세션 |
+| DELETE | `/api/auth/account` | 계정 삭제 (지금 비밀번호 + 확인 문구 "계정 삭제") → 내 자료 전부 연쇄 삭제 |
+| GET | `/api/plans/{id}/days` | 5일 사용 기록: 날짜별 지표(하루 실제 실행 시간, 분), 규칙 변경 위치, 합계·평균과 그 식 |
+| GET | `/api/plans/{id}/days` | 날짜별 기록 + 계획 규칙 변경 시점 (5일 사용 기록용) |
 | GET | `/api/meta` | 판정 이름표, ±20% 기준값 |
 | GET / POST | `/api/plans` | 계획 목록(집계 포함) / 계획 만들기 (`from_review_id`로 지난 돌아보기 연결) |
 | GET / DELETE | `/api/plans/{id}` | 계획 상세(할 일·기록·돌아보기·집계·출처 교훈) / 삭제 |
@@ -126,7 +142,9 @@
 
 ## 처음부터 설치할 때
 
-Supabase SQL Editor에서 차례로 실행: `schema.sql` → `migrations/002` → `003` → `004` → `005` → `006`.
+Supabase SQL Editor에서 차례로 실행: `schema.sql` → `migrations/002` → `003` → `004` → `005` → `006` → `007`.
+(기존 자료가 있다면) 배포 → 화면에서 가입 → `008`의 이메일을 내 이메일로 바꿔 실행.
+쓰기 요청(POST·PUT·PATCH·DELETE)에는 `X-Requested-With: pds` 헤더가 있어야 합니다.
 Vercel 환경변수: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`.
 
 ## 보안 점검

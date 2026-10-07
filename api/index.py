@@ -1,8 +1,12 @@
 """
-플랜두씨 다이어리 — 2단계: 서버 API (Vercel Python 서버리스 함수)
+플랜두씨 다이어리 — 서버 API (Vercel Python 서버리스 함수)
 
 브라우저는 이 API만 부르고, Supabase 비밀키는 이 파일이 실행되는
 서버(Vercel) 환경변수에만 있습니다. 브라우저로는 절대 내려가지 않습니다.
+
+인증(과제 7): 가입·로그인하면 HttpOnly 쿠키에 무작위 세션 토큰을 준다. DB에는 토큰의
+SHA-256만 저장한다. /api/auth/* 와 /api/health 를 뺀 모든 /api 요청은 유효한 세션이 있어야 하고,
+모든 자료 접근은 OwnerScoped(db())를 거쳐 로그인한 사람의 user_id 조건이 붙는다.
 
 환경변수
   SUPABASE_URL         예) https://abcd1234.supabase.co
@@ -12,12 +16,17 @@
 import os
 import re
 from collections import defaultdict
+from decimal import ROUND_HALF_UP, Decimal
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 
+import hashlib
+import secrets
+
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 app.json.ensure_ascii = False  # 응답 JSON에 한글을 그대로
@@ -132,9 +141,14 @@ class Supabase:
         """eq 말고 다른 조건(lt. 등)으로 지울 때. params는 PostgREST 필터 그대로."""
         return len(self._send("DELETE", table, params, prefer="return=representation"))
 
+    def select_where(self, table, params: dict, order="id"):
+        """eq 말고 다른 조건(gte. 등)으로 읽을 때. params는 PostgREST 필터 그대로."""
+        return self._send("GET", table, {"select": "*", "order": order, **params})
 
-def db():
-    """테스트에서는 app.config["DB"]에 가짜 DB를 넣어 바꿔 끼운다."""
+
+def raw_db():
+    """주인 확인 없이 DB를 그대로 쓴다. 계정·세션 표처럼 로그인 전에 써야 하는 곳에서만.
+    테스트에서는 app.config["DB"]에 가짜 DB를 넣어 바꿔 끼운다."""
     if "DB" not in app.config:
         url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SECRET_KEY")
         missing = [n for n, v in (("SUPABASE_URL", url), ("SUPABASE_SECRET_KEY", key)) if not v]
@@ -142,6 +156,67 @@ def db():
             raise ApiError(500, "서버 설정 누락: " + ", ".join(missing))
         app.config["DB"] = Supabase(url, key)
     return app.config["DB"]
+
+
+# 주인이 있는 표. 이 표들은 db()를 거치면 언제나 "로그인한 사람의 것"만 읽고·고치고·지운다.
+OWNED_TABLES = {"plans", "tasks", "logs", "reviews", "plan_revisions", "task_completions", "request_keys"}
+
+
+class OwnerScoped:
+    """모든 자료 접근이 지나가는 관문. 주인 있는 표에는 user_id = 로그인한 사람 조건을 강제로 붙인다.
+    라우트 코드가 조건을 빠뜨려도 남의 자료가 섞일 수 없게 하려는 장치."""
+
+    def __init__(self, inner, user_id):
+        self.inner, self.user_id = inner, user_id
+
+    def _uid(self, table):
+        if table not in OWNED_TABLES:
+            return None
+        if self.user_id is None:                     # 로그인 없이 자료 표에 닿는 길은 없어야 한다
+            raise ApiError(401, "로그인이 필요합니다")
+        return self.user_id
+
+    def _eq(self, table, eq):
+        uid = self._uid(table)
+        return eq if uid is None else {**eq, "user_id": uid}
+
+    def _row(self, table, row):
+        uid = self._uid(table)
+        return row if uid is None else {**row, "user_id": uid}   # 클라이언트가 보낸 user_id는 덮어씀
+
+    def _params(self, table, params):
+        uid = self._uid(table)
+        return params if uid is None else {**params, "user_id": f"eq.{uid}"}
+
+    def select(self, table, order="id", **eq):
+        return self.inner.select(table, order, **self._eq(table, eq))
+
+    def select_where(self, table, params, order="id"):
+        return self.inner.select_where(table, self._params(table, params), order)
+
+    def insert(self, table, row):
+        return self.inner.insert(table, self._row(table, row))
+
+    def insert_ignore(self, table, row, on_conflict):
+        return self.inner.insert_ignore(table, self._row(table, row), on_conflict)
+
+    def upsert(self, table, row, on_conflict):
+        return self.inner.upsert(table, self._row(table, row), on_conflict)
+
+    def update(self, table, row, **eq):
+        row = {k: v for k, v in row.items() if k != "user_id"}  # 주인은 고칠 수 없다
+        return self.inner.update(table, row, **self._eq(table, eq))
+
+    def delete(self, table, **eq):
+        return self.inner.delete(table, **self._eq(table, eq))
+
+    def delete_where(self, table, params):
+        return self.inner.delete_where(table, self._params(table, params))
+
+
+def db():
+    """라우트는 언제나 이것을 쓴다 → 로그인한 사람의 자료만 보인다."""
+    return OwnerScoped(raw_db(), g.get("user_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +228,7 @@ PATTERNS = {"underestimate", "overestimate", "unplanned", "skipped", "on_track"}
 PRIORITIES = {"high", "medium", "low"}
 # 사람이 고칠 수 있는 계획 칸 (version, updated_at 등은 DB 트리거가 관리)
 PLAN_FIELDS = ("title", "start_date", "end_date", "goal",
-               "priority", "success_criteria", "estimated_minutes")
+               "priority", "success_criteria", "estimated_minutes", "rule", "question")
 
 
 def body() -> dict:
@@ -226,6 +301,189 @@ def get_task(task_id, deleted=False):
 
 
 # ---------------------------------------------------------------------------
+# 인증: 가입·로그인·로그아웃, 그리고 모든 /api 요청 앞의 관문
+# ---------------------------------------------------------------------------
+SESSION_COOKIE = "pds_session"
+SESSION_DAYS = 7
+LOGIN_WINDOW_MIN, LOGIN_MAX_FAILS = 15, 5          # 같은 이메일로 15분에 5번 틀리면 잠시 막음
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
+PUBLIC_PATHS = {"/api/health", "/api/auth/signup", "/api/auth/login", "/api/auth/logout"}
+# 없는 이메일로 로그인할 때도 해시 비교를 한 번 해서, 응답 시간으로 가입 여부를 알아내기 어렵게
+_DUMMY_HASH = generate_password_hash("dummy-password-for-timing")
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def parse_ts(v: str) -> datetime:
+    return datetime.fromisoformat(v.replace("Z", "+00:00"))
+
+
+def is_https():
+    return request.is_secure or request.headers.get("X-Forwarded-Proto", "").split(",")[0] == "https"
+
+
+@app.before_request
+def gate():
+    """① 상태를 바꾸는 요청은 우리 화면이 붙이는 헤더가 있어야 한다(다른 사이트가 몰래 보내는 요청 차단).
+       ② 공개 경로를 뺀 /api 요청은 유효한 세션 쿠키가 있어야 한다. 없으면 401."""
+    if not request.path.startswith("/api/"):
+        return None
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.headers.get("X-Requested-With") != "pds":
+        raise ApiError(403, "허용되지 않은 요청입니다 (X-Requested-With 헤더 없음)")
+    g.user_id, g.email, g.session_id = None, None, None
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        rows = raw_db().select("sessions", token_hash=token_hash(token))
+        if rows and parse_ts(rows[0]["expires_at"]) > now_utc():
+            g.user_id, g.session_id = rows[0]["user_id"], rows[0]["id"]
+    if g.user_id is None and request.path not in PUBLIC_PATHS:
+        raise ApiError(401, "로그인이 필요합니다")
+    return None
+
+
+@app.after_request
+def no_store(resp):
+    if request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"        # 내 자료가 중간 캐시에 남지 않게
+    return resp
+
+
+def set_session_cookie(resp, token, max_age):
+    resp.set_cookie(SESSION_COOKIE, token, max_age=max_age, httponly=True,
+                    secure=is_https(), samesite="Lax", path="/")
+    return resp
+
+
+def start_session(user_id):
+    token = secrets.token_urlsafe(32)                 # 256비트 무작위 — 쿠키에만 원문이 있다
+    raw_db().insert("sessions", {
+        "user_id": user_id,
+        "token_hash": token_hash(token),
+        "expires_at": (now_utc() + timedelta(days=SESSION_DAYS)).isoformat(),
+        "user_agent": (request.headers.get("User-Agent") or "")[:300] or None,
+    })
+    return token
+
+
+def read_credentials():
+    d = body()
+    email, password = d.get("email"), d.get("password")
+    if not isinstance(email, str) or not isinstance(password, str):
+        raise ApiError(400, "이메일과 비밀번호를 글자로 보내 주세요")
+    email = email.strip().lower()
+    if len(email) > 254 or not EMAIL_RE.match(email):
+        raise ApiError(400, "이메일 형식이 올바르지 않습니다")
+    return email, password
+
+
+@app.post("/api/auth/signup")
+def signup():
+    email, password = read_credentials()
+    if not 10 <= len(password) <= 128:
+        raise ApiError(400, "비밀번호는 10자 이상 128자 이하로 정해 주세요")
+    if password.strip().lower() == email.split("@")[0]:
+        raise ApiError(400, "이메일 아이디와 같은 비밀번호는 쓸 수 없습니다")
+    if raw_db().select("users", email=email):
+        raise ApiError(409, "이미 가입한 이메일입니다")
+    user = raw_db().insert("users", {"email": email, "password_hash": generate_password_hash(password)})
+    token = start_session(user["id"])
+    resp = jsonify(email=user["email"])
+    resp.status_code = 201
+    return set_session_cookie(resp, token, SESSION_DAYS * 86400)
+
+
+@app.post("/api/auth/login")
+def login():
+    email, password = read_credentials()
+    since = (now_utc() - timedelta(minutes=LOGIN_WINDOW_MIN)).isoformat()
+    fails = raw_db().select_where("login_attempts", {"email": f"eq.{email}", "ok": "eq.false",
+                                                      "attempted_at": f"gte.{since}"})
+    if len(fails) >= LOGIN_MAX_FAILS:
+        raise ApiError(429, f"로그인 실패가 많습니다. {LOGIN_WINDOW_MIN}분 뒤 다시 시도해 주세요")
+    rows = raw_db().select("users", email=email)
+    ok = check_password_hash(rows[0]["password_hash"] if rows else _DUMMY_HASH, password) and bool(rows)
+    raw_db().insert("login_attempts", {"email": email, "ok": ok, "attempted_at": now_utc().isoformat()})
+    if not ok:
+        raise ApiError(401, "이메일 또는 비밀번호가 맞지 않습니다")   # 어느 쪽이 틀렸는지 알려주지 않는다
+    raw_db().delete_where("sessions", {"user_id": f"eq.{rows[0]['id']}",
+                                       "expires_at": f"lt.{now_utc().isoformat()}"})  # 만료 세션 정리
+    token = start_session(rows[0]["id"])
+    return set_session_cookie(jsonify(email=rows[0]["email"]), token, SESSION_DAYS * 86400)
+
+
+@app.post("/api/auth/logout")
+def logout():
+    """세션 줄을 지운다 → 같은 쿠키 값으로 다시 요청해도 401. 쿠키도 비운다."""
+    if g.session_id is not None:
+        raw_db().delete("sessions", id=g.session_id)
+    return set_session_cookie(jsonify(ok=True), "", 0)
+
+
+@app.get("/api/auth/me")
+def me():
+    rows = raw_db().select("users", id=g.user_id)
+    return jsonify(email=rows[0]["email"] if rows else None)
+
+
+def check_new_password(password, email):
+    if not isinstance(password, str) or not 10 <= len(password) <= 128:
+        raise ApiError(400, "비밀번호는 10자 이상 128자 이하로 정해 주세요")
+    if password.strip().lower() == email.split("@")[0]:
+        raise ApiError(400, "이메일 아이디와 같은 비밀번호는 쓸 수 없습니다")
+
+
+def confirm_password(user, password):
+    """민감한 일(비밀번호 바꾸기·계정 삭제) 전에 지금 비밀번호를 한 번 더 확인한다.
+    틀린 횟수는 로그인 실패와 같은 장부에 쌓여서, 여기로 비밀번호를 맞혀 보는 것도 15분에 5번까지."""
+    since = (now_utc() - timedelta(minutes=LOGIN_WINDOW_MIN)).isoformat()
+    fails = raw_db().select_where("login_attempts", {"email": f"eq.{user['email']}", "ok": "eq.false",
+                                                      "attempted_at": f"gte.{since}"})
+    if len(fails) >= LOGIN_MAX_FAILS:
+        raise ApiError(429, f"비밀번호 확인 실패가 많습니다. {LOGIN_WINDOW_MIN}분 뒤 다시 시도해 주세요")
+    if not isinstance(password, str) or not check_password_hash(user["password_hash"], password):
+        raw_db().insert("login_attempts", {"email": user["email"], "ok": False, "attempted_at": now_utc().isoformat()})
+        raise ApiError(403, "지금 비밀번호가 맞지 않습니다")
+
+
+@app.post("/api/auth/password")
+def change_password():
+    """비밀번호 바꾸기. 바꾸는 순간 이 계정의 세션을 '모두' 지운다
+    → 다른 기기·예전 쿠키 값은 전부 401. 바꾼 이 브라우저에만 새 세션을 준다."""
+    d = body()
+    user = raw_db().select("users", id=g.user_id)[0]
+    confirm_password(user, d.get("current_password"))
+    new = d.get("new_password")
+    check_new_password(new, user["email"])
+    if check_password_hash(user["password_hash"], new):
+        raise ApiError(400, "지금과 다른 비밀번호로 정해 주세요")
+    raw_db().update("users", {"password_hash": generate_password_hash(new)}, id=user["id"])
+    ended = raw_db().delete("sessions", user_id=user["id"])          # 예전 세션 전부 무효
+    token = start_session(user["id"])
+    return set_session_cookie(jsonify(email=user["email"], ended_sessions=ended), token, SESSION_DAYS * 86400)
+
+
+@app.delete("/api/auth/account")
+def delete_account():
+    """계정 삭제. users 한 줄을 지우면 DB 외래키(ON DELETE CASCADE)가
+    계획 → 할 일·실행 기록·완료 기록·돌아보기·수정 이력, 세션, 요청 키를 함께 지운다. 되돌릴 수 없다."""
+    d = body()
+    user = raw_db().select("users", id=g.user_id)[0]
+    if d.get("confirm") != "계정 삭제":
+        raise ApiError(400, "확인 문구 '계정 삭제'를 정확히 적어 주세요")
+    confirm_password(user, d.get("password"))
+    counts = {t: len(db().select(t)) for t in EXPORT_TABLES}           # 지워질 내 자료 건수 (안내용)
+    raw_db().delete("users", id=user["id"])                            # ← 여기서 내 자료 전부가 연쇄 삭제
+    raw_db().delete("login_attempts", email=user["email"])
+    return set_session_cookie(jsonify(deleted=True, email=user["email"], deleted_counts=counts), "", 0)
+
+
+# ---------------------------------------------------------------------------
 # 같은 요청 알아보기 (Idempotency-Key)
 #   화면은 "한 번의 의도"마다 고유 키를 만들어 헤더에 붙인다.
 #   연타·재전송으로 같은 키가 또 오면, 일을 다시 하지 않고 처음 응답을 그대로 돌려준다.
@@ -247,7 +505,10 @@ def idempotent(view):
                                      {"key": key, "method": request.method, "path": request.path},
                                      on_conflict="key")
         if claimed is None:                                   # 이미 본 키
-            seen = db().select("request_keys", order="key", key=key)[0]
+            mine = db().select("request_keys", order="key", key=key)   # 내 키만 보인다
+            if not mine:                                      # 남이 쓴 키 → 그 응답을 돌려주지 않는다
+                raise ApiError(422, "이 요청 키는 쓸 수 없습니다")
+            seen = mine[0]
             if (seen["method"], seen["path"]) != (request.method, request.path):
                 raise ApiError(422, "이 요청 키는 다른 요청에 이미 쓰였습니다")
             if seen["status"] is None:
@@ -394,7 +655,8 @@ def load_completions(plan_id=None):
 # ---------------------------------------------------------------------------
 @app.get("/api/health")
 def health():
-    db().select("plans", order="id")  # 실제로 DB에 한 번 다녀온다
+    # 실제로 DB에 한 번 다녀온다 (로그인 없이도 열리므로 자료는 읽지 않고 id 하나만)
+    raw_db().select_where("users", {"select": "id", "limit": "1"})
     return jsonify(ok=True, db="connected")
 
 
@@ -431,6 +693,8 @@ def plan_fields(d: dict, partial: bool) -> dict:
         "priority":          lambda: choice(d, "priority", PRIORITIES),
         "success_criteria":  lambda: text(d, "success_criteria", 500, required=True),
         "estimated_minutes": lambda: integer(d, "estimated_minutes", 1, 100000),
+        "rule":              lambda: text(d, "rule", 200),   # 계획 규칙 (예: 예상 시간은 1.5배로)
+        "question":          lambda: text(d, "question", 200),  # 5일 동안 답하려는 질문 (1일차에 고정)
     }
     return {k: f() for k, f in checks.items() if not partial or k in d}
 
@@ -970,6 +1234,138 @@ def put_review(plan_id):
     return jsonify(db().upsert("reviews", row, on_conflict="plan_id"))
 
 
+# --- 날짜별 기록 · 5일 사용 지표 ------------------------------------------------------
+#   지표·단위·계산 규칙은 코드에 한 번만 적고(METRIC), 화면·설명서·내보내기가 모두 이 값을 쓴다.
+#   → 규칙 변경 전과 후가 반드시 같은 지표·같은 단위·같은 계산으로 비교된다.
+OUTLIER_MINUTES = 180
+METRIC = {
+    "name": "하루 실제 실행 시간",
+    "unit": "분",
+    "calc": "그날(서울 날짜, done_date)에 남긴 실행 기록의 '실제 걸린 시간'을 모두 더한다. "
+            "기록한 날마다 한 줄, 1일차 = 기록이 처음 있는 날.",
+    "missing": "실행 기록이 하나도 없는 날은 0분으로 채우지 않고 '기록한 날'에서 뺀다(5일에 세지 않음). "
+               "기록 한 건의 실제 시간은 DB가 비워 둘 수 없게 막는다.",
+    "duplicate": "같은 할 일·같은 시작 시각의 기록이 두 번 있으면 한 번만 더한다(먼저 적은 것). "
+                 "저장 단추 연타는 요청 키로 처음부터 막힌다.",
+    "outlier": f"기록 한 건이 {OUTLIER_MINUTES}분을 넘으면 '튀는 값'으로 표시하지만, 실제로 한 시간이므로 빼지 않고 더한다.",
+    "rounding": "분은 정수 그대로 더한다. 평균만 소수 첫째 자리까지, 둘째 자리에서 반올림(0.05 → 0.1).",
+    "week_start": "월요일 (주 = 월요일~일요일)",
+}
+
+
+def round1(x) -> float:
+    return float(Decimal(str(x)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def to_kst(v: str) -> datetime:
+    return parse_ts(v).astimezone(KST)
+
+
+@app.get("/api/plans/<int:plan_id>/days")
+def plan_days(plan_id):
+    plan = get_one("plans", plan_id)
+    tasks, logs = load(plan_id)
+    # 계획 버전들(옛 것 + 지금). 버전마다 그 버전이 시작된 시각(valid_from)이 있다.
+    versions = db().select("plan_revisions", order="version", plan_id=plan_id) + [
+        {**plan, "valid_from": plan.get("updated_at")}]
+
+    def value_at(field, at: datetime):           # 그 시각에 적용 중이던 값
+        current = None
+        for v in versions:
+            if v.get("valid_from") and parse_ts(v["valid_from"]) <= at:
+                current = v.get(field)
+        return current
+
+    def changes_of(field):
+        out = []
+        for prev, cur in zip(versions, versions[1:]):
+            if (prev.get(field) or None) != (cur.get(field) or None):
+                at = to_kst(cur["valid_from"])
+                out.append({"version": cur["version"], "at": at.isoformat(), "date": at.date().isoformat(),
+                            "from": prev.get(field), "to": cur.get(field), "note": cur.get("change_note")})
+        return out
+
+    # 1) 날짜별로 묶고, 중복(같은 할 일·같은 시작 시각)은 먼저 적은 한 건만
+    by_day, seen, dup_count = defaultdict(list), set(), defaultdict(int)
+    for l in sorted(logs, key=lambda x: (x.get("created_at") or "", x["id"])):
+        key = (l["task_id"], l["started_at"]) if l.get("started_at") else ("id", l["id"])
+        if key in seen:
+            dup_count[l["done_date"]] += 1
+            continue
+        seen.add(key)
+        by_day[l["done_date"]].append(l)
+
+    days = []
+    for n, day in enumerate(sorted(by_day), 1):
+        rows = by_day[day]
+        made = sorted(to_kst(l["created_at"]) for l in rows if l.get("created_at"))
+        first = made[0] if made else datetime.combine(date.fromisoformat(day), datetime.min.time(), KST)
+        d0 = date.fromisoformat(day)
+        days.append({
+            "n": n, "date": day, "weekday": "월화수목금토일"[d0.weekday()],
+            "week_of": (d0 - timedelta(days=d0.weekday())).isoformat(),        # 그 주 월요일
+            "logs": len(rows), "minutes": sum(l["actual_minutes"] for l in rows),
+            "minutes_each": [l["actual_minutes"] for l in rows],
+            "duplicates_skipped": dup_count[day],
+            "outliers": [l["actual_minutes"] for l in rows if l["actual_minutes"] > OUTLIER_MINUTES],
+            "first_recorded_at": made[0].isoformat() if made else None,
+            "last_recorded_at": made[-1].isoformat() if made else None,
+            "recorded_same_day": sum(1 for m in made if m.date() == d0),
+            "rule": value_at("rule", first),                 # 그날 첫 기록을 남길 때 적용 중이던 규칙
+        })
+
+    # 2) 규칙 변경: 1일차 첫 기록 뒤에 일어난 변경만 '사용 중 변경'으로 센다 (처음 정한 것은 변경이 아님)
+    rule_changes = changes_of("rule")
+    start = parse_ts(days[0]["first_recorded_at"]) if days and days[0]["first_recorded_at"] else None
+    during = [c for c in rule_changes if start and parse_ts(c["at"]) > start]
+    for c in rule_changes:
+        c["during_use"] = c in during
+    change = during[0] if len(during) == 1 else None
+    placement = None
+    if change and len(days) >= 3:
+        at = parse_ts(change["at"])
+        after_day2 = parse_ts(days[1]["last_recorded_at"]) < at
+        before_day3 = at < parse_ts(days[2]["first_recorded_at"])
+        placement = {"after_day2_last_record": days[1]["last_recorded_at"], "change_at": change["at"],
+                     "before_day3_first_record": days[2]["first_recorded_at"],
+                     "ok": after_day2 and before_day3}
+
+    # 3) 합계·평균 — 화면에 보이는 숫자 그대로 손으로 더해 맞춰 볼 수 있게 식도 함께 돌려준다
+    def block(ds):
+        total = sum(d["minutes"] for d in ds)
+        return {"days": [d["n"] for d in ds], "sum": total, "avg": round1(total / len(ds)) if ds else None,
+                "formula": (" + ".join(str(d["minutes"]) for d in ds) + f" = {total}분, {total} ÷ {len(ds)} = "
+                            f"{round1(total / len(ds))}분") if ds else None}
+    if change:
+        before = [d for d in days if parse_ts(d["first_recorded_at"]) < parse_ts(change["at"])]
+        after = [d for d in days if d not in before]
+    else:
+        before, after = days, []
+    totals = {"all": block(days), "before": block(before), "after": block(after)}
+    if before and after:
+        totals["diff_avg"] = round1(totals["after"]["avg"] - totals["before"]["avg"])
+
+    # 4) 질문은 1일차에 고정: 2일차 첫 기록 전까지 정해져 있고, 그 뒤로 바뀌지 않았는지
+    q_changes = changes_of("question")
+    day2_start = parse_ts(days[1]["first_recorded_at"]) if len(days) >= 2 else None
+    q_fixed = bool(plan.get("question")) and (
+        day2_start is None or (value_at("question", day2_start) == plan.get("question")
+                               and not any(parse_ts(c["at"]) > day2_start for c in q_changes)))
+
+    checks = [
+        {"id": "question", "ok": q_fixed, "label": "1일차에 정한 질문이 그 뒤로 바뀌지 않음"},
+        {"id": "five_days", "ok": len(days) == 5, "label": f"기록한 날이 정확히 5일 (지금 {len(days)}일)"},
+        {"id": "same_day", "ok": bool(days) and all(d["recorded_same_day"] == d["logs"] for d in days),
+         "label": "모든 기록을 그 날짜 당일(서울)에 적음"},
+        {"id": "one_change", "ok": len(during) == 1, "label": f"사용 중 규칙 변경이 딱 한 번 (지금 {len(during)}번)"},
+        {"id": "placement", "ok": bool(placement and placement["ok"]),
+         "label": "규칙 변경이 2일차 마지막 기록 뒤, 3일차 첫 기록 앞"},
+    ]
+    return jsonify(plan_id=plan_id, question=plan.get("question"), question_changes=q_changes,
+                   metric=METRIC, days=days, rule_changes=rule_changes, rule_change=change,
+                   placement=placement, totals=totals, checks=checks, current_rule=plan.get("rule"))
+
+
 # --- 내 자료 전체 내보내기 ---------------------------------------------------------
 #   표 그대로(행·ID·시각·단위 그대로) JSON 파일 하나로. request_keys는 중복 방지용 내부 장부라 뺀다.
 EXPORT_TABLES = ("plans", "plan_revisions", "tasks", "logs", "task_completions", "reviews")
@@ -981,7 +1377,8 @@ def export_all():
     data = {t: db().select(t, order="id") for t in EXPORT_TABLES}
     payload = {
         "format": "plan-do-see-export",
-        "schema": "pds-schema-v2",                  # contracts/pds-schema-v2.json 과 같은 구조
+        "schema": "pds-schema-v3",                  # contracts/pds-schema-v3.json 과 같은 구조
+        "account": (raw_db().select("users", id=g.user_id) or [{}])[0].get("email"),
         "exported_at": now.isoformat(),
         "rules": {
             "timestamps": "timestamptz — ISO 8601, 시간대 포함. 화면은 Asia/Seoul로 보여 줌",
@@ -989,6 +1386,7 @@ def export_all():
             "durations": "정수, 분(minute) 단위 (planned_minutes, estimated_minutes, actual_minutes)",
             "trash": "tasks.deleted_at이 차 있으면 휴지통에 있는 할 일 (30일 뒤 영구 삭제)",
         },
+        "metric": METRIC,                           # 5일 사용 기록에 쓴 지표·단위·계산 규칙
         "counts": {t: len(rows) for t, rows in data.items()},
         "data": data,
     }

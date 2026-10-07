@@ -1,16 +1,18 @@
 {
-  "$id": "contracts/pds-schema-v2.json",
+  "$id": "contracts/pds-schema-v3.json",
   "name": "plan-do-see",
-  "version": 2,
+  "version": 3,
   "database": "PostgreSQL (Supabase)",
-  "generated_from": "schema.sql + migrations/002~006 를 빈 Postgres 16에 차례로 실행한 뒤 information_schema에서 읽은 실제 구조",
+  "generated_from": "schema.sql + migrations/002~008 를 빈 Postgres 16에 차례로 실행한 뒤 information_schema에서 읽은 실제 구조",
   "migrations": [
     "schema.sql",
     "migrations/002_card1_plan_history.sql",
     "migrations/003_card2_tasks.sql",
     "migrations/004_card3_logs_completions.sql",
     "migrations/005_task_trash.sql",
-    "migrations/006_drop_old_view.sql"
+    "migrations/006_drop_old_view.sql",
+    "migrations/007_auth.sql",
+    "migrations/008_claim_legacy_data.sql"
   ],
   "rules": {
     "ids": "모든 id는 bigint, DB가 매기는 identity(generated always). 고쳐도 바뀌지 않는다. request_keys만 UUID 키.",
@@ -19,9 +21,33 @@
     "today": "'오늘'·지연 판정은 서버에서 Asia/Seoul 날짜 기준 (Vercel 서버는 UTC로 돌기 때문).",
     "durations": "시간 길이는 모두 정수 분(minute): plans.estimated_minutes, tasks.planned_minutes, logs.actual_minutes. 화면에서만 'n시간 m분'으로 보여 준다. 차이 = 실제 − 예상 (같은 단위).",
     "deletion": "할 일 지우기 = tasks.deleted_at 표시(휴지통). 30일 뒤 또는 '영구 삭제' 때 실제 DELETE, 딸린 logs·task_completions는 ON DELETE CASCADE. 계획을 지우면 딸린 모든 것이 연쇄 삭제.",
-    "security": "모든 표 RLS 켬 + 정책 0개 → 공개(anon) 키로는 읽기·쓰기 불가. 서버(Vercel 함수)만 비밀키(service_role / sb_secret_)로 접근."
+    "security": "모든 표 RLS 켬 + 정책 0개 → 공개(anon) 키로는 읽기·쓰기 불가. 서버(Vercel 함수)만 비밀키(service_role / sb_secret_)로 접근.",
+    "auth": "가입·로그인하면 HttpOnly·SameSite=Lax(https면 Secure) 쿠키 pds_session에 무작위 토큰(256비트). DB에는 SHA-256만. 세션 7일. 로그아웃 = sessions 줄 삭제. 비밀번호는 scrypt 해시만 저장.",
+    "ownership": "자료 표(plans·tasks·logs·reviews·plan_revisions·task_completions·request_keys)는 모두 user_id를 가진다. 서버는 모든 접근에 user_id = 로그인한 사람 조건을 강제로 붙인다(OwnerScoped). 딸린 표의 user_id는 트리거가 계획 주인으로 채우고, 복합 외래키 (plan_id, user_id) → plans(id, user_id)가 어긋남을 막는다. 남의 자료 요청은 404(있는지조차 알려주지 않음)."
   },
   "relations": [
+    {
+      "from": "plans.user_id",
+      "to": "users.id",
+      "on_delete": "cascade",
+      "cardinality": "계정 1 : 계획 N"
+    },
+    {
+      "from": "(tasks|logs|reviews|plan_revisions|task_completions).(plan_id, user_id)",
+      "to": "plans.(id, user_id)",
+      "note": "딸린 자료의 주인은 언제나 그 계획의 주인과 같다"
+    },
+    {
+      "from": "sessions.user_id",
+      "to": "users.id",
+      "on_delete": "cascade",
+      "cardinality": "계정 1 : 세션 N"
+    },
+    {
+      "from": "request_keys.user_id",
+      "to": "users.id",
+      "on_delete": "cascade"
+    },
     {
       "from": "tasks.plan_id",
       "to": "plans.id",
@@ -73,10 +99,16 @@
   ],
   "triggers": [
     {
+      "name": "*_owner (inherit_plan_owner)",
+      "table": "tasks, logs, reviews, plan_revisions, task_completions",
+      "when": "BEFORE INSERT",
+      "does": "user_id를 그 계획의 주인으로 채운다 (클라이언트가 보낸 값 무시)"
+    },
+    {
       "name": "plans_keep_history",
       "table": "plans",
       "when": "BEFORE UPDATE",
-      "does": "계획 내용(title, start_date, end_date, goal, priority, success_criteria, estimated_minutes)이 바뀌면 직전 값을 plan_revisions에 넣고 version+1"
+      "does": "계획 내용(title, start_date, end_date, goal, priority, success_criteria, estimated_minutes, rule, question)이 바뀌면 직전 값을 plan_revisions에 넣고 version+1. 주인(user_id) 변경은 거부"
     },
     {
       "name": "plan_revisions_readonly",
@@ -98,6 +130,51 @@
     }
   ],
   "tables": {
+    "login_attempts": {
+      "description": "로그인 시도 기록. 같은 이메일로 15분에 5번 틀리면 잠시 막는 데 씀.",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "기록 ID"
+        },
+        "email": {
+          "type": "text",
+          "nullable": false,
+          "description": "시도한 이메일"
+        },
+        "ok": {
+          "type": "boolean",
+          "nullable": false,
+          "description": "성공 여부"
+        },
+        "attempted_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "시도 시각"
+        }
+      },
+      "constraints": [
+        {
+          "name": "login_attempts_email_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(email) <= 254))"
+        },
+        {
+          "name": "login_attempts_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "login_attempts_email_attempted_at_idx",
+          "definition": "CREATE INDEX login_attempts_email_attempted_at_idx ON public.login_attempts USING btree (email, attempted_at)"
+        }
+      ]
+    },
     "logs": {
       "description": "실행 기록(Do). 계획·할 일의 예상 값을 덮어쓰지 않는 별도 표.",
       "columns": {
@@ -157,6 +234,11 @@
           "type": "text",
           "nullable": true,
           "description": "막혔던 이유 (500자 이하)"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "주인 — 계획 주인을 트리거가 채움"
         }
       },
       "constraints": [
@@ -179,6 +261,11 @@
           "name": "logs_note_check",
           "kind": "check",
           "definition": "CHECK ((char_length(note) <= 500))"
+        },
+        {
+          "name": "logs_owner_fk",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id, user_id) REFERENCES plans(id, user_id)"
         },
         {
           "name": "logs_pkey",
@@ -219,6 +306,10 @@
         {
           "name": "logs_task_id_idx",
           "definition": "CREATE INDEX logs_task_id_idx ON public.logs USING btree (task_id)"
+        },
+        {
+          "name": "logs_user_id_idx",
+          "definition": "CREATE INDEX logs_user_id_idx ON public.logs USING btree (user_id)"
         }
       ]
     },
@@ -291,9 +382,29 @@
           "nullable": false,
           "default": "now()",
           "description": "다음 버전으로 바뀐 시각"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "주인 — 계획 주인을 트리거가 채움"
+        },
+        "rule": {
+          "type": "text",
+          "nullable": true,
+          "description": "그때 계획 규칙"
+        },
+        "question": {
+          "type": "text",
+          "nullable": true,
+          "description": "그때 5일 질문"
         }
       },
       "constraints": [
+        {
+          "name": "plan_revisions_owner_fk",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id, user_id) REFERENCES plans(id, user_id)"
+        },
         {
           "name": "plan_revisions_pkey",
           "kind": "primary key",
@@ -314,6 +425,10 @@
         {
           "name": "plan_revisions_plan_id_idx",
           "definition": "CREATE INDEX plan_revisions_plan_id_idx ON public.plan_revisions USING btree (plan_id)"
+        },
+        {
+          "name": "plan_revisions_user_id_idx",
+          "definition": "CREATE INDEX plan_revisions_user_id_idx ON public.plan_revisions USING btree (user_id)"
         }
       ]
     },
@@ -389,6 +504,21 @@
           "nullable": false,
           "default": "now()",
           "description": "지금 버전이 생긴 시각"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "계획의 주인(users.id). 한번 정해지면 바꿀 수 없음(트리거)"
+        },
+        "rule": {
+          "type": "text",
+          "nullable": true,
+          "description": "계획 규칙 (200자 이하). 바꾸면 옛 규칙이 이력에 남음"
+        },
+        "question": {
+          "type": "text",
+          "nullable": true,
+          "description": "5일 동안 답하려는 질문 (200자 이하). 1일차에 정하고 바꾸지 않음 — 바뀌면 이력에 남음"
         }
       },
       "constraints": [
@@ -418,6 +548,11 @@
           "definition": "CHECK ((char_length(goal) <= 500))"
         },
         {
+          "name": "plans_id_user_key",
+          "kind": "unique",
+          "definition": "UNIQUE (id, user_id)"
+        },
+        {
           "name": "plans_pkey",
           "kind": "primary key",
           "definition": "PRIMARY KEY (id)"
@@ -428,6 +563,16 @@
           "definition": "CHECK ((priority = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])))"
         },
         {
+          "name": "plans_question_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(question) <= 200))"
+        },
+        {
+          "name": "plans_rule_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(rule) <= 200))"
+        },
+        {
           "name": "plans_success_criteria_check",
           "kind": "check",
           "definition": "CHECK ((char_length(success_criteria) <= 500))"
@@ -436,9 +581,19 @@
           "name": "plans_title_check",
           "kind": "check",
           "definition": "CHECK (((char_length(title) >= 1) AND (char_length(title) <= 100)))"
+        },
+        {
+          "name": "plans_user_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
         }
       ],
-      "indexes": []
+      "indexes": [
+        {
+          "name": "plans_user_id_idx",
+          "definition": "CREATE INDEX plans_user_id_idx ON public.plans USING btree (user_id)"
+        }
+      ]
     },
     "request_keys": {
       "description": "같은 요청 알아보기(Idempotency-Key) 장부. 내부용이라 내보내기에는 넣지 않음.",
@@ -473,6 +628,11 @@
           "nullable": false,
           "default": "now()",
           "description": "처음 받은 시각"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "키를 쓴 사람. 남의 키로는 남의 응답을 받을 수 없음"
         }
       },
       "constraints": [
@@ -480,6 +640,11 @@
           "name": "request_keys_pkey",
           "kind": "primary key",
           "definition": "PRIMARY KEY (key)"
+        },
+        {
+          "name": "request_keys_user_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
         }
       ],
       "indexes": []
@@ -523,6 +688,11 @@
           "nullable": false,
           "default": "now()",
           "description": "처음 쓴 시각"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "주인 — 계획 주인을 트리거가 채움"
         }
       },
       "constraints": [
@@ -535,6 +705,11 @@
           "name": "reviews_miss_pattern_check",
           "kind": "check",
           "definition": "CHECK ((miss_pattern = ANY (ARRAY['underestimate'::text, 'overestimate'::text, 'unplanned'::text, 'skipped'::text, 'on_track'::text])))"
+        },
+        {
+          "name": "reviews_owner_fk",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id, user_id) REFERENCES plans(id, user_id)"
         },
         {
           "name": "reviews_pkey",
@@ -562,7 +737,82 @@
           "definition": "CHECK ((char_length(went_wrong) <= 1000))"
         }
       ],
-      "indexes": []
+      "indexes": [
+        {
+          "name": "reviews_user_id_idx",
+          "definition": "CREATE INDEX reviews_user_id_idx ON public.reviews USING btree (user_id)"
+        }
+      ]
+    },
+    "sessions": {
+      "description": "로그인 세션. 쿠키에는 무작위 토큰 원문, DB에는 그 SHA-256만. 로그아웃하면 줄을 지운다.",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "세션 ID"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "누구의 세션인지"
+        },
+        "token_hash": {
+          "type": "text",
+          "nullable": false,
+          "description": "세션 토큰의 SHA-256 (16진수 64자)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "로그인 시각"
+        },
+        "expires_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "description": "만료 시각 (로그인 후 7일)"
+        },
+        "user_agent": {
+          "type": "text",
+          "nullable": true,
+          "description": "로그인한 브라우저 정보 (300자 이하)"
+        }
+      },
+      "constraints": [
+        {
+          "name": "sessions_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "sessions_token_hash_check",
+          "kind": "check",
+          "definition": "CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))"
+        },
+        {
+          "name": "sessions_token_hash_key",
+          "kind": "unique",
+          "definition": "UNIQUE (token_hash)"
+        },
+        {
+          "name": "sessions_user_agent_check",
+          "kind": "check",
+          "definition": "CHECK ((char_length(user_agent) <= 300))"
+        },
+        {
+          "name": "sessions_user_id_fkey",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sessions_user_id_idx",
+          "definition": "CREATE INDEX sessions_user_id_idx ON public.sessions USING btree (user_id)"
+        }
+      ]
     },
     "task_completions": {
       "description": "완료 기록. 할 일이 진행 중→완료로 '바뀔 때만' 트리거가 1줄 만든다. 할 일당 살아 있는 줄은 1개(유일 인덱스).",
@@ -593,6 +843,11 @@
           "type": "timestamptz",
           "nullable": true,
           "description": "진행 중으로 되돌린 시각. 차 있으면 집계에서 뺌"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "주인 — 계획 주인을 트리거가 채움"
         }
       },
       "constraints": [
@@ -600,6 +855,11 @@
           "name": "task_completions_check",
           "kind": "check",
           "definition": "CHECK (((revoked_at IS NULL) OR (revoked_at >= completed_at)))"
+        },
+        {
+          "name": "task_completions_owner_fk",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id, user_id) REFERENCES plans(id, user_id)"
         },
         {
           "name": "task_completions_pkey",
@@ -625,6 +885,10 @@
         {
           "name": "task_completions_plan_id_idx",
           "definition": "CREATE INDEX task_completions_plan_id_idx ON public.task_completions USING btree (plan_id)"
+        },
+        {
+          "name": "task_completions_user_id_idx",
+          "definition": "CREATE INDEX task_completions_user_id_idx ON public.task_completions USING btree (user_id)"
         }
       ]
     },
@@ -696,6 +960,11 @@
           "type": "timestamptz",
           "nullable": true,
           "description": "휴지통으로 옮긴 시각. 비어 있으면 살아 있는 할 일"
+        },
+        "user_id": {
+          "type": "bigint",
+          "nullable": true,
+          "description": "주인 — 계획 주인을 트리거가 채움"
         }
       },
       "constraints": [
@@ -708,6 +977,11 @@
           "name": "tasks_id_plan_id_key",
           "kind": "unique",
           "definition": "UNIQUE (id, plan_id)"
+        },
+        {
+          "name": "tasks_owner_fk",
+          "kind": "foreign key",
+          "definition": "FOREIGN KEY (plan_id, user_id) REFERENCES plans(id, user_id)"
         },
         {
           "name": "tasks_pkey",
@@ -757,8 +1031,57 @@
         {
           "name": "tasks_tags_idx",
           "definition": "CREATE INDEX tasks_tags_idx ON public.tasks USING gin (tags)"
+        },
+        {
+          "name": "tasks_user_id_idx",
+          "definition": "CREATE INDEX tasks_user_id_idx ON public.tasks USING btree (user_id)"
         }
       ]
+    },
+    "users": {
+      "description": "계정. 비밀번호 원문은 저장하지 않는다.",
+      "columns": {
+        "id": {
+          "type": "bigint",
+          "nullable": false,
+          "identity": "generated always",
+          "description": "계정 ID"
+        },
+        "email": {
+          "type": "text",
+          "nullable": false,
+          "description": "로그인 이메일 (소문자로 저장, 유일)"
+        },
+        "password_hash": {
+          "type": "text",
+          "nullable": false,
+          "description": "werkzeug generate_password_hash(scrypt) 결과 — 'scrypt:N:r:p$소금$해시' 형식만 허용(제약)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "가입 시각"
+        }
+      },
+      "constraints": [
+        {
+          "name": "users_email_check",
+          "kind": "check",
+          "definition": "CHECK (((email = lower(email)) AND ((char_length(email) >= 3) AND (char_length(email) <= 254)) AND (email ~~ '%_@_%'::text)))"
+        },
+        {
+          "name": "users_password_hash_check",
+          "kind": "check",
+          "definition": "CHECK (((password_hash ~~ 'scrypt:%'::text) OR (password_hash ~~ 'pbkdf2:%'::text)))"
+        },
+        {
+          "name": "users_pkey",
+          "kind": "primary key",
+          "definition": "PRIMARY KEY (id)"
+        }
+      ],
+      "indexes": []
     }
   }
 }

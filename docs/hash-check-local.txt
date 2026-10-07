@@ -1,0 +1,19 @@
+# 로컬(실제 Postgres)에서 docs/hash-check.sql 실행 결과 — 2026-10-07 12:08 서울
+# verify_auth.py --pause-before-delete 로 만든 시험 계정 A·B (두 계정의 비밀번호는 같음)
+
+             email              |      method      | salt_head | hash_head | len 
+--------------------------------+------------------+-----------+-----------+-----
+ authcheck-a-11383c@example.com | scrypt:32768:8:1 | FX0G…     | 7f57b263… | 162
+ authcheck-b-c7b5ae@example.com | scrypt:32768:8:1 | q45F…     | bdae486d… | 162
+(2 rows)
+
+ accounts | distinct_stored_values 
+----------+------------------------
+        2 |                      2
+(1 row)
+
+ raw_password_anywhere 
+-----------------------
+                     0
+(1 row)
+

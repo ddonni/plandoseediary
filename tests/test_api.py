@@ -11,26 +11,57 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 import index  # noqa: E402
 
 
+CHILD_TABLES = ("tasks", "logs", "reviews", "plan_revisions", "task_completions")
+
+
 class FakeDb:
-    """Supabase 클래스와 같은 메서드를 가진 메모리 DB (외래키·연쇄삭제 흉내)."""
+    """Supabase 클래스와 같은 메서드를 가진 메모리 DB (외래키·연쇄삭제·주인 상속 트리거 흉내)."""
 
     def __init__(self):
         self.t = {"plans": [], "tasks": [], "logs": [], "reviews": [], "plan_revisions": [],
-                  "task_completions": [], "request_keys": []}
+                  "task_completions": [], "request_keys": [],
+                  "users": [], "sessions": [], "login_attempts": []}
         self.ids = itertools.count(1)
+        self.clock = None          # 정해 두면 '지금'(created_at·updated_at)으로 쓴다 — 5일 기록 순서 시험용
 
     def _match(self, row, eq):
         return all(row.get(k) == v for k, v in eq.items())
 
+    @staticmethod
+    def _cond(v, cond):
+        op, val = cond.split(".", 1)
+        sv = str(v).lower() if isinstance(v, bool) else str(v)
+        if op == "eq":
+            return v is not None and sv == val
+        if op == "is":
+            return v is None
+        if v is None:
+            return False
+        return {"lt": sv < val, "gt": sv > val, "gte": sv >= val, "lte": sv <= val}[op]
+
+    def _where(self, row, params):
+        return all(self._cond(row.get(k), c) for k, c in params.items() if k not in ("select", "limit", "order"))
+
     def select(self, table, order="id", **eq):
         return [dict(r) for r in self.t[table] if self._match(r, eq)]
+
+    def select_where(self, table, params, order="id"):
+        rows = [dict(r) for r in self.t[table] if self._where(r, params)]
+        return rows[: int(params["limit"])] if "limit" in params else rows
+
+    def _owner_of(self, plan_id):
+        return next((p.get("user_id") for p in self.t["plans"] if p["id"] == plan_id), None)
 
     def insert(self, table, row):
         if table == "logs" and row["task_id"] is not None:
             task = next(t for t in self.t["tasks"] if t["id"] == row["task_id"])
             if task["plan_id"] != row["plan_id"]:
                 raise index.ApiError(*index.PG_ERRORS["23503"])
+        if table in ("users",) and any(u["email"] == row["email"] for u in self.t["users"]):
+            raise index.ApiError(*index.PG_ERRORS["23505"])
         row = {"id": next(self.ids), **row}
+        if table in CHILD_TABLES:                      # inherit_plan_owner 트리거 흉내
+            row["user_id"] = self._owner_of(row["plan_id"])
         if table == "tasks":
             for k, v in (("due_date", None), ("priority", "medium"), ("tags", []),
                          ("status", "open"), ("done_at", None), ("deleted_at", None)):
@@ -38,24 +69,19 @@ class FakeDb:
         if table == "plans":
             row.setdefault("from_review_id", None)
             row.setdefault("goal", None)
-            row.update(version=1, change_note=None, updated_at=f"t{row['id']}")
+            row.setdefault("rule", None)
+            row.setdefault("question", None)
+            row.update(version=1, change_note=None,
+                       updated_at=self.clock or f"2026-10-0{1 + row['id'] % 8}T00:00:00+00:00")
+        if table == "logs":                            # created_at 기본값 흉내: 지금(=기록을 남긴 시각)
+            row.setdefault("created_at", self.clock or row.get("ended_at") or "2026-10-02T00:00:00+00:00")
         self.t[table].append(row)
         if table == "tasks":
             self._completion_events(None, row)
         return dict(row)
 
     def delete_where(self, table, params):
-        """PostgREST 필터 흉내: 'lt.값', 'eq.값'만"""
-        def ok(r):
-            for k, cond in params.items():
-                op, val = cond.split(".", 1)
-                v = r.get(k)
-                if op == "lt" and not (v is not None and str(v) < val):
-                    return False
-                if op == "eq" and str(v) != val:
-                    return False
-            return True
-        gone = [r["id"] for r in self.t[table] if ok(r)]
+        gone = [r["id"] for r in self.t[table] if self._where(r, params)]
         for i in gone:
             self.delete(table, id=i)
         return len(gone)
@@ -71,11 +97,12 @@ class FakeDb:
                   if c["task_id"] == new["id"] and c["revoked_at"] is None]
         if new["status"] == "done" and (old is None or old["status"] != "done") and not active:
             self.t["task_completions"].append({"id": next(self.ids), "task_id": new["id"],
-                                               "plan_id": new["plan_id"], "completed_at": "now",
+                                               "plan_id": new["plan_id"], "user_id": new.get("user_id"),
+                                               "completed_at": "2026-10-02T03:00:00+00:00",
                                                "revoked_at": None})
         elif old is not None and old["status"] == "done" and new["status"] == "open":
             for c in active:
-                c["revoked_at"] = "now"
+                c["revoked_at"] = "2026-10-02T04:00:00+00:00"
 
     def update(self, table, row, **eq):
         """plans_keep_history 트리거 흉내: 내용이 바뀌면 옛 값을 이력에 쌓고 버전+1"""
@@ -84,12 +111,13 @@ class FakeDb:
             if not self._match(r, eq):
                 continue
             new = {**r, **row}
-            if table == "plans" and any(new[k] != r[k] for k in index.PLAN_FIELDS):
+            if table == "plans" and any(new.get(k) != r.get(k) for k in index.PLAN_FIELDS):
                 self.t["plan_revisions"].append({
-                    "id": next(self.ids), "plan_id": r["id"],
-                    **{k: r[k] for k in (*index.PLAN_FIELDS, "version", "change_note")},
+                    "id": next(self.ids), "plan_id": r["id"], "user_id": r.get("user_id"),
+                    **{k: r.get(k) for k in (*index.PLAN_FIELDS, "version", "change_note")},
                     "valid_from": r["updated_at"], "replaced_at": "now"})
-                new.update(version=r["version"] + 1, updated_at="now")
+                new.update(version=r["version"] + 1,
+                           updated_at=self.clock or f"2026-10-0{min(9, r['version'] + 2)}T05:00:00+00:00")
             elif table == "plans":
                 new.update(version=r["version"], change_note=r["change_note"])
             old = dict(r)
@@ -111,19 +139,34 @@ class FakeDb:
         self.t[table] = [r for r in self.t[table] if not self._match(r, eq)]
         for r in gone:  # on delete cascade
             if table == "plans":
-                for child in ("tasks", "logs", "reviews", "plan_revisions", "task_completions"):
+                for child in CHILD_TABLES:
                     self.delete(child, plan_id=r["id"])
             if table == "tasks":
                 self.delete("logs", task_id=r["id"])
                 self.delete("task_completions", task_id=r["id"])
+            if table == "users":
+                self.delete("sessions", user_id=r["id"])
+                self.delete("plans", user_id=r["id"])
         return len(gone)
+
+
+PASSWORD = "correct-horse-battery"   # 테스트 전용 값
+
+
+def new_client(email="a@example.com"):
+    """가입·로그인까지 마친 테스트 클라이언트 (쿠키가 저장된다)."""
+    cl = index.app.test_client()
+    cl.environ_base["HTTP_X_REQUESTED_WITH"] = "pds"
+    r = cl.post("/api/auth/signup", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 201, r.json
+    return cl
 
 
 @pytest.fixture
 def c():
     index.app.config["DB"] = FakeDb()
     index.app.config["TESTING"] = True
-    yield index.app.test_client()
+    yield new_client()
     index.app.config.pop("DB")
 
 
@@ -815,7 +858,7 @@ def test_card5_export_everything(c):                                          # 
     assert r.status_code == 200
     assert r.headers["Content-Disposition"].startswith('attachment; filename="plan-do-see-export-')
     j = r.json
-    assert j["schema"] == "pds-schema-v2" and set(j["data"]) == set(index.EXPORT_TABLES)
+    assert j["schema"] == "pds-schema-v3" and j["account"] == "a@example.com" and set(j["data"]) == set(index.EXPORT_TABLES)
     assert "request_keys" not in j["data"]
     d = j["data"]
     assert [p["title"] for p in d["plans"]] == ["고친 이름"] and d["plan_revisions"][0]["title"] == "10월 1주"
@@ -852,7 +895,7 @@ def test_card5_no_secret_in_any_response(c, monkeypatch):                    # C
 def test_contract_matches_code():                                            # contracts/pds-schema-v2.json
     import json
     from pathlib import Path
-    contract = json.loads((Path(__file__).resolve().parents[1] / "contracts" / "pds-schema-v2.json").read_text())
+    contract = json.loads((Path(__file__).resolve().parents[1] / "contracts" / "pds-schema-v3.json").read_text())
     tables = contract["tables"]
     assert set(index.EXPORT_TABLES) <= set(tables) and "request_keys" in tables
     cols = lambda t: set(tables[t]["columns"])
@@ -862,3 +905,365 @@ def test_contract_matches_code():                                            # c
     assert set(log) <= cols("logs")
     assert {"went_well", "went_wrong", "miss_pattern", "lesson"} <= cols("reviews")
     assert all(c.get("description") for t in tables.values() for c in t["columns"].values())
+
+
+# ================= 과제 7: 인증 =================
+def fresh():
+    """빈 가짜 DB와, 아직 로그인 안 한 클라이언트."""
+    index.app.config["DB"] = FakeDb()
+    cl = index.app.test_client()
+    cl.environ_base["HTTP_X_REQUESTED_WITH"] = "pds"
+    return cl
+
+
+def cookie_of(cl):
+    ck = cl.get_cookie(index.SESSION_COOKIE)
+    return ck.value if ck else None
+
+
+def test_auth_signup_login_logout_me():
+    cl = fresh()
+    assert cl.get("/api/auth/me").status_code == 401
+    r = cl.post("/api/auth/signup", json={"email": " Me@Example.com ", "password": PASSWORD})
+    assert r.status_code == 201 and r.json == {"email": "me@example.com"}
+    assert cl.get("/api/auth/me").json == {"email": "me@example.com"}
+    assert cl.post("/api/auth/logout").json == {"ok": True}
+    assert cl.get("/api/auth/me").status_code == 401
+    assert cl.post("/api/auth/login", json={"email": "me@example.com", "password": "wrong-password!"}).status_code == 401
+    r = cl.post("/api/auth/login", json={"email": "ME@example.com", "password": PASSWORD})
+    assert r.status_code == 200 and cl.get("/api/auth/me").json["email"] == "me@example.com"
+
+
+def test_auth_signup_validation():
+    cl = fresh()
+    assert cl.post("/api/auth/signup", json={"email": "bad", "password": PASSWORD}).status_code == 400
+    assert cl.post("/api/auth/signup", json={"email": "a@b.co", "password": "short"}).status_code == 400
+    assert cl.post("/api/auth/signup", json={"email": "abcdefghij@b.co", "password": "abcdefghij"}).status_code == 400
+    assert cl.post("/api/auth/signup", json={"email": "a@b.co", "password": PASSWORD}).status_code == 201
+    assert cl.post("/api/auth/signup", json={"email": "A@B.CO", "password": PASSWORD}).status_code == 409
+
+
+def test_auth_password_stored_as_hash_only():                    # 저장된 비밀번호에 입력한 글자가 없다
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "h@example.com", "password": PASSWORD})
+    users = index.app.config["DB"].t["users"]
+    stored = users[0]["password_hash"]
+    assert PASSWORD not in stored and stored.startswith("scrypt:")
+    assert PASSWORD not in repr(index.app.config["DB"].t)            # 어떤 표에도 원문이 없다
+    token = cookie_of(cl)
+    sess = index.app.config["DB"].t["sessions"][0]
+    assert token not in repr(index.app.config["DB"].t) and sess["token_hash"] == index.token_hash(token)
+
+
+def test_auth_every_data_route_needs_login():                     # 로그인 없이 자료 화면 → 401
+    cl = fresh()
+    owner = index.app.test_client(); owner.environ_base["HTTP_X_REQUESTED_WITH"] = "pds"
+    owner.post("/api/auth/signup", json={"email": "o@example.com", "password": PASSWORD})
+    pid = owner.post("/api/plans", json=PLAN).json["id"]
+    rules = [r for r in index.app.url_map.iter_rules() if r.rule.startswith("/api/")]
+    checked = 0
+    for rule in rules:
+        if rule.rule in index.PUBLIC_PATHS:
+            continue
+        path = rule.rule.replace("<int:plan_id>", str(pid)).replace("<int:task_id>", "1") \
+                        .replace("<int:log_id>", "1").replace("<int:review_id>", "1")
+        for m in rule.methods - {"HEAD", "OPTIONS"}:
+            r = cl.open(path, method=m, json={})
+            assert r.status_code == 401 and r.json["error"] == "로그인이 필요합니다", (m, path, r.status_code)
+            checked += 1
+    assert checked >= 25
+
+
+def test_auth_logout_then_same_cookie_rejected():                 # 로그아웃 뒤 같은 값으로 다시 → 거절
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "l@example.com", "password": PASSWORD})
+    token = cookie_of(cl)
+    assert cl.get("/api/plans").status_code == 200
+    cl.post("/api/auth/logout")
+    assert cookie_of(cl) is None                                       # 브라우저 쿠키는 비워짐
+    replay = index.app.test_client()
+    replay.set_cookie(index.SESSION_COOKIE, token)                     # 예전 쿠키 값을 그대로 다시 붙여 보냄
+    r = replay.get("/api/plans")
+    assert r.status_code == 401 and r.json["error"] == "로그인이 필요합니다"
+    assert index.app.config["DB"].t["sessions"] == []
+
+
+def test_auth_expired_session_rejected():
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "x@example.com", "password": PASSWORD})
+    index.app.config["DB"].t["sessions"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
+    assert cl.get("/api/plans").status_code == 401
+
+
+def test_auth_forged_cookie_rejected():
+    cl = fresh()
+    cl.set_cookie(index.SESSION_COOKIE, "made-up-token-value")
+    assert cl.get("/api/plans").status_code == 401
+
+
+def test_auth_login_rate_limit():
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "r@example.com", "password": PASSWORD})
+    cl.post("/api/auth/logout")
+    for _ in range(5):
+        assert cl.post("/api/auth/login", json={"email": "r@example.com", "password": "nope-nope-nope"}).status_code == 401
+    r = cl.post("/api/auth/login", json={"email": "r@example.com", "password": PASSWORD})
+    assert r.status_code == 429                                        # 맞는 비밀번호도 잠시 막힘
+    # 없는 이메일과 틀린 비밀번호는 같은 문장
+    a = cl.post("/api/auth/login", json={"email": "nobody@example.com", "password": "nope-nope-nope"}).json
+    assert a["error"] == "이메일 또는 비밀번호가 맞지 않습니다"
+
+
+def test_auth_csrf_header_required():
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "c@example.com", "password": PASSWORD})
+    bare = index.app.test_client()
+    bare.set_cookie(index.SESSION_COOKIE, cookie_of(cl))
+    r = bare.post("/api/plans", json=PLAN)                             # 쿠키는 있지만 헤더 없음
+    assert r.status_code == 403
+    assert bare.get("/api/plans").status_code == 200                   # 읽기는 헤더 없이도
+
+
+def two_users():
+    index.app.config["DB"] = FakeDb()
+    a, b = new_client("a@example.com"), new_client("b@example.com")
+    out = {}
+    for name, cl in (("a", a), ("b", b)):
+        pid = cl.post("/api/plans", json={**PLAN, "title": f"{name}의 계획"}).json["id"]
+        tid = cl.post(f"/api/plans/{pid}/tasks", json={"title": f"{name}의 할 일", "planned_minutes": 30}).json["id"]
+        lid = cl.post(f"/api/tasks/{tid}/logs", json={**times(20), "blocker": f"{name}의 막힘"}).json["id"]
+        rid = cl.put(f"/api/plans/{pid}/review", json={"miss_pattern": "on_track", "lesson": f"{name}의 교훈"}).json["id"]
+        out[name] = {"cl": cl, "pid": pid, "tid": tid, "lid": lid, "rid": rid}
+    return out
+
+
+@pytest.mark.parametrize("me,other", [("a", "b"), ("b", "a")])          # 양방향
+def test_auth_cannot_touch_others_data(me, other):
+    u = two_users()
+    cl, o = u[me]["cl"], u[other]
+    pid, tid, lid, rid = o["pid"], o["tid"], o["lid"], o["rid"]
+    attempts = [
+        ("GET", f"/api/plans/{pid}", None), ("GET", f"/api/plans/{pid}/tasks", None),
+        ("GET", f"/api/plans/{pid}/review", None), ("GET", f"/api/plans/{pid}/revisions", None),
+        ("GET", f"/api/plans/{pid}/trash", None), ("GET", f"/api/plans/{pid}/days", None),
+        ("GET", f"/api/reviews/{rid}", None),
+        ("PATCH", f"/api/plans/{pid}", {"title": "뺏기", "change_note": "x"}),
+        ("PUT", f"/api/plans/{pid}/review", {"miss_pattern": "on_track", "lesson": "덮어쓰기"}),
+        ("POST", f"/api/plans/{pid}/tasks", {"title": "끼워넣기", "planned_minutes": 10}),
+        ("POST", f"/api/plans/{pid}/logs", {**times(10), "note": "끼워넣기"}),
+        ("PATCH", f"/api/tasks/{tid}", {"title": "뺏기"}),
+        ("PATCH", f"/api/tasks/{tid}", {"status": "done"}),
+        ("POST", f"/api/tasks/{tid}/logs", times(10)),
+        ("POST", f"/api/tasks/{tid}/restore", None),
+        ("DELETE", f"/api/tasks/{tid}", None),
+        ("DELETE", f"/api/tasks/{tid}?permanent=1", None),
+        ("DELETE", f"/api/logs/{lid}", None),
+        ("DELETE", f"/api/plans/{pid}", None),
+    ]
+    for m, path, body_ in attempts:
+        r = cl.open(path, method=m, json=body_)
+        assert r.status_code == 404, (m, path, r.status_code, r.json)
+    # 다음 계획에 남의 돌아보기를 이어 붙이기
+    assert cl.post("/api/plans", json={**PLAN, "from_review_id": rid}).status_code == 404
+    # 남의 것은 하나도 바뀌지 않았다
+    oc = o["cl"]
+    d = oc.get(f"/api/plans/{pid}").json
+    assert d["plan"]["title"] == f"{other}의 계획" and d["review"]["lesson"] == f"{other}의 교훈"
+    assert [t["title"] for t in d["tasks"]] == [f"{other}의 할 일"] and len(d["logs"]) == 1
+    assert d["tasks"][0]["status"] == "open"
+
+
+@pytest.mark.parametrize("me,other", [("a", "b"), ("b", "a")])
+def test_auth_lists_never_mix(me, other):                              # 목록에도 섞이지 않는다
+    u = two_users()
+    cl = u[me]["cl"]
+    dump = "".join(cl.get(p).get_data(as_text=True) for p in (
+        "/api/plans", "/api/reviews", "/api/stats", "/api/export", "/api/records?kind=tasks",
+        "/api/records?kind=logs", "/api/records?kind=review:on_track"))
+    assert f"{me}의 계획" in dump and f"{me}의 막힘" in dump
+    assert f"{other}의" not in dump
+    ex = cl.get("/api/export").json
+    assert ex["account"] == f"{me}@example.com"
+    assert all(len(rows) <= 2 for rows in ex["data"].values())
+
+
+def test_auth_owner_cannot_be_spoofed():
+    u = two_users()
+    a, b = u["a"], u["b"]
+    r = a["cl"].post("/api/plans", json={**PLAN, "user_id": 999, "title": "속이기"})
+    plan = next(p for p in index.app.config["DB"].t["plans"] if p["id"] == r.json["id"])
+    assert plan["user_id"] == index.app.config["DB"].t["users"][0]["id"]
+    a["cl"].patch(f"/api/plans/{a['pid']}", json={"user_id": b["pid"], "title": "x", "change_note": "y"})
+    assert next(p for p in index.app.config["DB"].t["plans"] if p["id"] == a["pid"])["user_id"] == plan["user_id"]
+
+
+def test_auth_idempotency_key_not_shared():
+    import uuid
+    u = two_users()
+    key = str(uuid.uuid4())
+    r = u["a"]["cl"].patch(f"/api/tasks/{u['a']['tid']}", json={"title": "a 비밀"}, headers={"Idempotency-Key": key})
+    assert r.status_code == 200
+    r = u["b"]["cl"].patch(f"/api/tasks/{u['a']['tid']}", json={"title": "a 비밀"}, headers={"Idempotency-Key": key})
+    assert r.status_code == 422 and "a 비밀" not in r.get_data(as_text=True)
+
+
+def test_rule_change_shows_in_days():
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "d@example.com", "password": PASSWORD})
+    pid = cl.post("/api/plans", json={**PLAN, "rule": "예상 시간은 처음 생각 그대로"}).json["id"]
+    tid = cl.post(f"/api/plans/{pid}/tasks", json={"title": "x", "planned_minutes": 30}).json["id"]
+    for day in ("2026-10-07", "2026-10-08", "2026-10-09"):
+        cl.post(f"/api/tasks/{tid}/logs", json={"started_at": f"{day}T09:00:00+09:00", "ended_at": f"{day}T09:40:00+09:00"})
+    r = cl.patch(f"/api/plans/{pid}", json={"rule": "예상 시간은 1.5배로", "change_note": "3일차 전 규칙 변경"})
+    assert r.json["changed"]
+    d = cl.get(f"/api/plans/{pid}/days").json
+    assert [x["date"] for x in d["days"]] == ["2026-10-07", "2026-10-08", "2026-10-09"] and d["days"][0]["logs"] == 1
+    assert d["rule_changes"][0]["from"] == "예상 시간은 처음 생각 그대로" and d["rule_changes"][0]["to"] == "예상 시간은 1.5배로"
+    assert d["current_rule"] == "예상 시간은 1.5배로"
+
+
+# ================= 과제 7 보강: 비밀번호 바꾸기 · 계정 삭제 · 남의 계정 적어 보내기 · 5일 지표 =================
+def test_password_change_ends_every_old_session():                 # T07-C114
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "p@example.com", "password": PASSWORD})
+    phone = index.app.test_client(); phone.environ_base["HTTP_X_REQUESTED_WITH"] = "pds"
+    phone.post("/api/auth/login", json={"email": "p@example.com", "password": PASSWORD})   # 다른 기기
+    old_here, old_phone = cookie_of(cl), cookie_of(phone)
+    assert cl.post("/api/auth/password", json={"current_password": "wrong-password-x", "new_password": "new-password-123"}).status_code == 403
+    assert cl.post("/api/auth/password", json={"current_password": PASSWORD, "new_password": "short"}).status_code == 400
+    assert cl.post("/api/auth/password", json={"current_password": PASSWORD, "new_password": PASSWORD}).status_code == 400
+    r = cl.post("/api/auth/password", json={"current_password": PASSWORD, "new_password": "new-password-123"})
+    assert r.status_code == 200 and r.json["ended_sessions"] == 2
+    assert cookie_of(cl) not in (None, old_here)                      # 바꾼 브라우저는 새 세션
+    assert cl.get("/api/plans").status_code == 200
+    for old in (old_here, old_phone):                                  # 예전 값은 모두 거절
+        replay = index.app.test_client(); replay.set_cookie(index.SESSION_COOKIE, old)
+        assert replay.get("/api/plans").status_code == 401
+    assert phone.get("/api/plans").status_code == 401
+    out = index.app.test_client(); out.environ_base["HTTP_X_REQUESTED_WITH"] = "pds"
+    assert out.post("/api/auth/login", json={"email": "p@example.com", "password": PASSWORD}).status_code == 401
+    assert out.post("/api/auth/login", json={"email": "p@example.com", "password": "new-password-123"}).status_code == 200
+    assert "new-password-123" not in repr(index.app.config["DB"].t)
+
+
+def test_account_delete_removes_all_my_data_only():                  # T07-C134
+    u = two_users()
+    a, b = u["a"], u["b"]
+    dbm = index.app.config["DB"]
+    before_b = {t: len([r for r in dbm.t[t] if r.get("user_id") == dbm.t["users"][1]["id"]]) for t in index.EXPORT_TABLES}
+    assert a["cl"].delete("/api/auth/account", json={"password": PASSWORD}).status_code == 400            # 확인 문구 없음
+    assert a["cl"].delete("/api/auth/account", json={"password": "nope-nope-nope", "confirm": "계정 삭제"}).status_code == 403
+    token = cookie_of(a["cl"])
+    r = a["cl"].delete("/api/auth/account", json={"password": PASSWORD, "confirm": "계정 삭제"})
+    assert r.status_code == 200 and r.json["deleted"] and r.json["deleted_counts"]["plans"] == 1
+    assert not any(x["email"] == "a@example.com" for x in dbm.t["users"])
+    a_id = 1
+    for t in (*index.EXPORT_TABLES, "sessions"):
+        assert not [x for x in dbm.t[t] if x.get("user_id") == a_id], t
+    replay = index.app.test_client(); replay.set_cookie(index.SESSION_COOKIE, token)
+    assert replay.get("/api/plans").status_code == 401
+    after_b = {t: len([r for r in dbm.t[t] if r.get("user_id") == dbm.t["users"][0]["id"]]) for t in index.EXPORT_TABLES}
+    assert before_b == after_b                                          # B의 자료는 그대로
+    cl = index.app.test_client(); cl.environ_base["HTTP_X_REQUESTED_WITH"] = "pds"
+    assert cl.post("/api/auth/login", json={"email": "a@example.com", "password": PASSWORD}).status_code == 401
+
+
+def test_other_account_named_in_query_header_body_is_ignored():      # T07-C123
+    u = two_users()
+    a, b = u["a"], u["b"]
+    b_uid = index.app.config["DB"].t["users"][1]["id"]
+    for path in (f"/api/plans?user_id={b_uid}", f"/api/plans?user_id=eq.{b_uid}", f"/api/export?user_id={b_uid}",
+                 f"/api/reviews?user_id={b_uid}"):
+        txt = a["cl"].get(path).get_data(as_text=True)
+        assert "b의" not in txt and "a의 계획" in txt, path
+    txt = a["cl"].get("/api/plans", headers={"X-User-Id": str(b_uid)}).get_data(as_text=True)
+    assert "b의" not in txt and "a의 계획" in txt
+    n_b = len(u["b"]["cl"].get("/api/plans").json)
+    r = a["cl"].post("/api/plans", json={**PLAN, "user_id": b_uid, "title": "B 것인 척"})
+    assert r.status_code == 201
+    assert len(u["b"]["cl"].get("/api/plans").json) == n_b             # B 쪽에 새로 생긴 것 없음
+    assert "B 것인 척" in a["cl"].get("/api/plans").get_data(as_text=True)
+
+
+def five_days(cl, change_at, rule_from="할 일은 한 번에 50분", rule_to="할 일은 25분 단위로 쪼갠다", minutes=(40, 55, 30, 200, 45)):
+    dbm = index.app.config["DB"]
+    dbm.clock = "2026-10-07T08:00:00+09:00"
+    pid = cl.post("/api/plans", json={**PLAN, "rule": rule_from, "question": "규칙을 바꾸면 하루 실행 시간이 늘까?"}).json["id"]
+    tid = cl.post(f"/api/plans/{pid}/tasks", json={"title": "공부", "planned_minutes": 60}).json["id"]
+    for i, m in enumerate(minutes):
+        day = f"2026-10-{7 + i:02d}"
+        if i == 2 and change_at == "before_day3":
+            dbm.clock = "2026-10-09T07:30:00+09:00"
+            cl.patch(f"/api/plans/{pid}", json={"rule": rule_to, "change_note": "2일 동안 50분 덩어리를 끝까지 못 버팀"})
+        dbm.clock = f"{day}T21:00:00+09:00"
+        cl.post(f"/api/tasks/{tid}/logs", json={"started_at": f"{day}T18:00:00+09:00",
+                                                 "ended_at": f"{day}T{18 + (m + 59) // 60:02d}:00:00+09:00",
+                                                 "actual_minutes": m})
+        if i == 1 and change_at == "same_evening_day2_before_record":
+            dbm.clock = "2026-10-08T20:00:00+09:00"
+            cl.patch(f"/api/plans/{pid}", json={"rule": rule_to, "change_note": "너무 이르게 바꿈"})
+    dbm.clock = None
+    return pid
+
+
+def test_days_metric_totals_and_rule_placement():                  # T07-C04~C15, C23~C27, C132
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "d5@example.com", "password": PASSWORD})
+    pid = five_days(cl, "before_day3")
+    d = cl.get(f"/api/plans/{pid}/days").json
+    assert d["metric"]["unit"] == "분" and d["metric"]["week_start"].startswith("월요일")
+    assert [x["minutes"] for x in d["days"]] == [40, 55, 30, 200, 45]
+    assert [x["n"] for x in d["days"]] == [1, 2, 3, 4, 5]
+    assert d["days"][3]["outliers"] == [200]                           # 튀는 값은 표시하지만 더한다
+    assert d["totals"]["all"]["sum"] == 370 and d["totals"]["all"]["avg"] == 74.0
+    assert d["totals"]["before"]["days"] == [1, 2] and d["totals"]["before"]["avg"] == 47.5
+    assert d["totals"]["after"]["days"] == [3, 4, 5] and d["totals"]["after"]["avg"] == 91.7   # 275/3 = 91.666… → 91.7
+    assert d["totals"]["diff_avg"] == 44.2
+    assert d["days"][0]["rule"] == "할 일은 한 번에 50분" and d["days"][2]["rule"] == "할 일은 25분 단위로 쪼갠다"
+    assert d["days"][0]["week_of"] == "2026-10-05"                      # 2026-10-07(수)의 주 → 월요일 10-05
+    assert d["placement"]["ok"] and all(c["ok"] for c in d["checks"]), d["checks"]
+    assert d["rule_change"]["note"] == "2일 동안 50분 덩어리를 끝까지 못 버팀"
+
+
+def test_days_flags_change_before_day2_record_and_duplicates():
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "d6@example.com", "password": PASSWORD})
+    pid = five_days(cl, "same_evening_day2_before_record", minutes=(40, 55, 30))
+    d = cl.get(f"/api/plans/{pid}/days").json
+    assert not d["placement"]["ok"]                                    # 2일차 기록(21시)보다 앞(20시)에 바꿈
+    assert not next(c for c in d["checks"] if c["id"] == "five_days")["ok"]
+    # 같은 할 일·같은 시작 시각 기록이 또 들어오면 한 번만 더한다
+    tid = cl.get(f"/api/plans/{pid}/tasks").json[0]["id"] if isinstance(cl.get(f"/api/plans/{pid}/tasks").json, list) \
+        else cl.get(f"/api/plans/{pid}").json["tasks"][0]["id"]
+    cl.post(f"/api/tasks/{tid}/logs", json={"started_at": "2026-10-07T18:00:00+09:00",
+                                             "ended_at": "2026-10-07T19:00:00+09:00", "actual_minutes": 40})
+    d = cl.get(f"/api/plans/{pid}/days").json
+    assert d["days"][0]["minutes"] == 40 and d["days"][0]["duplicates_skipped"] == 1
+
+
+def test_question_must_stay_fixed_after_day1():
+    cl = fresh()
+    cl.post("/api/auth/signup", json={"email": "q@example.com", "password": PASSWORD})
+    pid = five_days(cl, "before_day3")
+    assert next(c for c in cl.get(f"/api/plans/{pid}/days").json["checks"] if c["id"] == "question")["ok"]
+    index.app.config["DB"].clock = "2026-10-12T09:00:00+09:00"
+    cl.patch(f"/api/plans/{pid}", json={"question": "다른 질문", "change_note": "x"})
+    assert not next(c for c in cl.get(f"/api/plans/{pid}/days").json["checks"] if c["id"] == "question")["ok"]
+
+
+def test_password_and_hash_never_in_responses_or_logs(caplog):      # T07-C105·C106
+    import logging
+    caplog.set_level(logging.DEBUG)
+    cl = fresh()
+    bodies = [cl.post("/api/auth/signup", json={"email": "s@example.com", "password": PASSWORD})]
+    bodies.append(cl.post("/api/auth/login", json={"email": "s@example.com", "password": "wrong-password-zz"}))
+    bodies.append(cl.post("/api/auth/login", json={"email": "s@example.com", "password": PASSWORD}))
+    cl.post("/api/plans", json=PLAN)
+    for p in ("/api/auth/me", "/api/plans", "/api/export", "/api/stats"):
+        bodies.append(cl.get(p))
+    bodies.append(cl.post("/api/auth/password", json={"current_password": PASSWORD, "new_password": "brand-new-pass-1"}))
+    stored = index.app.config["DB"].t["users"][0]["password_hash"]
+    bodies.append(cl.delete("/api/auth/account", json={"password": "brand-new-pass-1", "confirm": "계정 삭제"}))
+    everything = "".join(b.get_data(as_text=True) + str(b.headers) for b in bodies) + caplog.text
+    for secret in (PASSWORD, "brand-new-pass-1", "wrong-password-zz", stored, stored.split("$")[-1]):
+        assert secret not in everything

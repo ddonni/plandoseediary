@@ -2,8 +2,8 @@
 """
 인증 확인 스크립트 — 막히는 장면을 실제 요청·응답으로 남긴다 (설명서 ④에 그대로 붙이기용).
 
-  python scripts/verify_auth.py https://plandoseediary.vercel.app > docs/auth-check.md
-  python scripts/verify_auth.py <주소> --pause-before-delete > docs/auth-check.md
+  python scripts/verify_auth.py https://plandoseediary.vercel.app --out docs/auth-check.md
+  python scripts/verify_auth.py <주소> --pause-before-delete --out docs/auth-check.md
       └ 계정을 지우기 직전에 멈춘다. 그때 Supabase SQL Editor에서 docs/hash-check.sql을 실행해
         "같은 비밀번호인데 저장값이 다르다"(T07-C104)를 확인하고 Enter.
 
@@ -25,8 +25,28 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+_argv = sys.argv[1:]
+OUT_PATH = None                                   # --out 파일: UTF-8로 직접 저장 (Windows PowerShell의 > 는 인코딩이 깨짐)
+if "--out" in _argv:
+    i = _argv.index("--out")
+    OUT_PATH = _argv[i + 1]
+    del _argv[i:i + 2]
+ARGS = [a for a in _argv if not a.startswith("--")]
 BASE = (ARGS[0] if ARGS else "http://localhost:5055").rstrip("/")
+for _stream in (sys.stdout, sys.stderr):          # Windows 콘솔(cp949)에서도 한글·기호가 깨지지 않게
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+
+def emit(text):
+    if OUT_PATH:
+        with open(OUT_PATH, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        sys.stderr.write(f"\n저장함: {OUT_PATH}\n")
+    else:
+        print(text)
 PAUSE = "--pause-before-delete" in sys.argv
 KST = timezone(timedelta(hours=9))
 H = {"X-Requested-With": "pds"}
@@ -121,7 +141,12 @@ def kst(days_ago=0, h=9, m=0):
 
 def counts(sess):
     """그 계정 주인이 자기 쿠키로 본 자기 자료 건수 (내보내기의 counts)."""
-    return sess.get(BASE + "/api/export", timeout=30).json()["counts"]
+    r = sess.get(BASE + "/api/export", timeout=30)
+    if r.status_code != 200:
+        raise SystemExit(f"\n[중단] 자료 건수를 세려고 GET /api/export 했는데 HTTP {r.status_code}: {body_text(r)}\n"
+                         "       401이면 시험 계정이나 세션이 실행 도중 지워진 것입니다 "
+                         "(예: 멈춘 사이에 'delete from users …'를 실행). 처음부터 다시 실행하세요.")
+    return r.json()["counts"]
 
 
 def fmt_counts(c):
@@ -294,7 +319,8 @@ def main():
         sys.stderr.write(
             "\n[멈춤] Supabase SQL Editor에서 docs/hash-check.sql을 실행해 두 계정의 저장값을 비교하세요.\n"
             f"       대상 이메일: {a['email']} , {b['email']}\n"
-            "       (둘의 비밀번호는 같습니다.) 다 봤으면 Enter → 두 계정을 지우고 끝냅니다.\n")
+            "       (둘의 비밀번호는 같습니다.) 다 봤으면 Enter → 두 계정을 지우고 끝냅니다.\n"
+            "       ⚠ 멈춘 동안 SQL로 계정을 지우지 마세요. 정리는 이 스크립트가 Enter 뒤에 합니다.\n")
         sys.stderr.flush()
         sys.stdin.readline()
     section("del", "계정 삭제 — 내 자료가 함께 지워짐",
@@ -328,9 +354,17 @@ def main():
                "| # | 묶음 | 확인 | 기대 | 실제 | 결과 |", "|---|---|---|---|---|---|"]
     for n, grp, title, exp, got, ok in results:
         summary.append(f"| {n} | {grp} | {title} | {exp} | {got} | {'✅' if ok else '❌'} |")
-    print("\n".join(out[:1] + side_by_side + [""] + summary + [""] + out[1:]))
+    emit("\n".join(out[:1] + side_by_side + [""] + summary + [""] + out[1:]))
+    sys.stderr.write(f"결과: {passed} / {len(results)} 통과\n")
     sys.exit(0 if passed == len(results) else 1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        if isinstance(e.code, str):                      # 중간에 멈추면 여기까지의 기록이라도 남긴다
+            emit("\n".join(out) + "\n\n## ❌ 실행 중단\n\n```\n" + e.code.strip() + "\n```")
+            sys.stderr.write(e.code + "\n")
+            sys.exit(1)
+        raise
